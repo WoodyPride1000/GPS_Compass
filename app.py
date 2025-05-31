@@ -1,14 +1,24 @@
 from flask import Flask, render_template, jsonify
 import math
+import serial
+import pynmea2
 
 app = Flask(__name__)
 
 def get_gps_position(device):
-    # 仮の値（実装では /dev/ttyUSBx を読む）
-    if device == "/dev/ttyUSB0":
-        return (35.681236, 139.767125)
-    elif device == "/dev/ttyUSB1":
-        return (35.681800, 139.768000)
+    try:
+        with serial.Serial(device, baudrate=9600, timeout=1) as ser:
+            for _ in range(20):  # 最大20行まで読み取りを試みる
+                line = ser.readline().decode('ascii', errors='ignore').strip()
+                if line.startswith('$GPGGA') or line.startswith('$GPRMC'):
+                    try:
+                        msg = pynmea2.parse(line)
+                        if hasattr(msg, 'latitude') and hasattr(msg, 'longitude'):
+                            return (msg.latitude, msg.longitude)
+                    except pynmea2.ParseError:
+                        continue
+    except serial.SerialException:
+        pass
     return None
 
 def calculate_heading_and_error(base, rover):
