@@ -1,46 +1,38 @@
-let map = L.map('map').setView([35.681236, 139.767125], 18);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
+let map;
+let marker;
+let headingLine;
 
-let marker = null;
-let arrow = null;
+function updateMap() {
+  fetch("/api/position")
+    .then((res) => res.json())
+    .then((data) => {
+      const lat = data.lat;
+      const lon = data.lon;
+      const heading = data.heading;
 
-function updateMap(data) {
-  const { lat, lon, heading, error, distance } = data;
+      if (!map) {
+        map = L.map("map").setView([lat, lon], 18);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "© OpenStreetMap contributors",
+        }).addTo(map);
+        marker = L.marker([lat, lon]).addTo(map);
+      } else {
+        map.setView([lat, lon]);
+        marker.setLatLng([lat, lon]);
+      }
 
-  // 更新：自己位置マーカー
-  if (marker) map.removeLayer(marker);
-  marker = L.marker([lat, lon]).addTo(map);
-
-  // 更新：方位矢印（画面で10%程度の長さ）
-  const arrowLen = 0.0003;
-  const lat2 = lat + arrowLen * Math.cos(heading * Math.PI / 180);
-  const lon2 = lon + arrowLen * Math.sin(heading * Math.PI / 180);
-
-  if (arrow) map.removeLayer(arrow);
-  arrow = L.polyline([[lat, lon], [lat2, lon2]], {color: 'red'}).addTo(map);
-
-  // 更新：情報表示
-  document.getElementById("info").innerHTML = `
-    <b>Lat:</b> ${lat.toFixed(6)}<br>
-    <b>Lon:</b> ${lon.toFixed(6)}<br>
-    <b>Heading:</b> ${heading.toFixed(2)}°<br>
-    <b>Distance:</b> ${distance.toFixed(2)} m<br>
-    <b>Error:</b> ${error.toFixed(2)} m
-  `;
+      // 方位線の更新
+      if (headingLine) {
+        map.removeLayer(headingLine);
+      }
+      const length = 0.0009; // 約100m程度、地図上の表示バランスに応じて調整
+      const lat2 = lat + length * Math.cos((heading * Math.PI) / 180);
+      const lon2 = lon + length * Math.sin((heading * Math.PI) / 180);
+      headingLine = L.polyline([[lat, lon], [lat2, lon2]], {
+        color: "red",
+        weight: 2,
+      }).addTo(map);
+    });
 }
 
-async function fetchPosition() {
-  try {
-    const res = await fetch('/api/position');
-    const data = await res.json();
-    updateMap(data);
-  } catch (err) {
-    console.error("Failed to fetch GPS data:", err);
-  }
-}
-
-// 初回実行 & 10秒ごと更新
-fetchPosition();
-setInterval(fetchPosition, 10000);
+setInterval(updateMap, 2000); // 2秒ごとに更新
