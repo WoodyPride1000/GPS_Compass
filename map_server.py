@@ -1,7 +1,7 @@
 from flask import Flask, render_template_string
 import folium
 from gps_reader import get_gps_position
-from heading_calc import calculate_heading_and_error, latlon_to_utm, latlon_to_mgrs
+from heading_calc import calculate_heading_and_error, latlon_to_utm
 
 app = Flask(__name__)
 
@@ -13,7 +13,6 @@ def index():
     heading, measured_distance, error = calculate_heading_and_error(base, rover)
     lat, lon = base
     utm_x, utm_y = latlon_to_utm(lat, lon)
-    mgrs_code = latlon_to_mgrs(lat, lon)
 
     fmap = folium.Map(location=[lat, lon], zoom_start=18)
     folium.Marker(
@@ -22,7 +21,6 @@ def index():
         popup=f"""
         <b>Lat/Lon:</b> {lat:.6f}, {lon:.6f}<br>
         <b>UTM:</b> {utm_x}, {utm_y}<br>
-        <b>MGRS:</b> {mgrs_code}<br>
         <b>Heading:</b> {heading:.2f}°<br>
         <b>Error:</b> {error:.2f} m
         """
