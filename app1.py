@@ -51,16 +51,20 @@ def calculate_heading_and_error(base, rover):
 def index():
     return render_template("index.html")
 
+
 @app.route("/api/position")
 def api_position():
     heading, dist, error = calculate_heading_and_error(latest_base, latest_rover)
     return jsonify({
-        "lat": latest_base[0],
-        "lon": latest_base[1],
+        "base": {"lat": latest_base[0], "lon": latest_base[1]},
+        "rover": {"lat": latest_rover[0], "lon": latest_rover[1]},
         "heading": heading,
         "distance": dist,
         "error": error
     })
+
+
+
 
 if __name__ == "__main__":
     threading.Thread(target=gps_reader, daemon=True).start()
