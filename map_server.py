@@ -6,12 +6,11 @@ import folium
 app = Flask(__name__)
 
 @app.route('/')
+@app.route('/')
 def index():
-    # GPSから読み取り（失敗したらNoneになる）
     base = get_gps_position('/dev/ttyUSB0')
     rover = get_gps_position('/dev/ttyUSB1')
 
-    # 仮の座標（東京駅周辺）
     if base is None:
         print("Base GPS not available. Using fallback coordinates.")
         base = (35.681236, 139.767125)
@@ -19,13 +18,20 @@ def index():
         print("Rover GPS not available. Using fallback coordinates.")
         rover = (35.681800, 139.768000)
 
-    # 計算
     heading, measured_distance, error = calculate_heading_and_error(base, rover)
     lat, lon = base
     utm_x, utm_y = latlon_to_utm(lat, lon)
 
-    # 地図作成
+    # 方位角に従って短い矢印線を描画（地球座標上で小さなオフセットを与える）
+    import math
+    arrow_length = 0.0003  # 緯度・経度で約30m（見た目10%ほど）
+    heading_rad = math.radians(heading)
+    lat2 = lat + arrow_length * math.cos(heading_rad)
+    lon2 = lon + arrow_length * math.sin(heading_rad)
+
     fmap = folium.Map(location=[lat, lon], zoom_start=18)
+    
+    # 自己位置マーカー
     folium.Marker(
         [lat, lon],
         tooltip="Base Station",
@@ -37,19 +43,33 @@ def index():
         """
     ).add_to(fmap)
 
+    # 方位角矢印（固定長）
     folium.PolyLine(
-        locations=[base, rover],
-        color='blue',
-        weight=3,
-        tooltip=f'Heading: {heading:.2f}°, Distance: {measured_distance:.2f}m'
+        locations=[(lat, lon), (lat2, lon2)],
+        color='red',
+        weight=5,
+        tooltip=f'Heading: {heading:.2f}°'
     ).add_to(fmap)
 
-    # HTMLとしてレンダリング
-    html = fmap._repr_html_()
-    return render_template_string("""
+    # 画面上に数値表示
+    info_html = f"""
+    <div style="position:absolute; top:10px; left:10px; background:white; padding:10px; z-index:999;">
+        <b>Lat:</b> {lat:.6f}<br>
+        <b>Lon:</b> {lon:.6f}<br>
+        <b>UTM:</b> {utm_x:.2f}, {utm_y:.2f}<br>
+        <b>Heading:</b> {heading:.2f}°<br>
+        <b>Error:</b> {error:.2f} m
+    </div>
+    """
+
+    map_html = fmap._repr_html_()
+    return render_template_string(f"""
     <html><head><meta charset="utf-8"><title>GPS Compass</title></head>
-    <body>{{ map_html|safe }}</body></html>
-    """, map_html=html)
+    <body>
+        {info_html}
+        {map_html}
+    </body></html>
+    """)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
