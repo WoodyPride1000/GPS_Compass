@@ -12,7 +12,7 @@ latest_rover = (35.681800, 139.768000)
 
 def get_gps_position(device):
     try:
-        with serial.Serial(device, baudrate=9600, timeout=1) as ser:
+        with serial.Serial(device, baudrate=4800, timeout=1) as ser:
             for _ in range(10):  # 最大10行まで読み取りを試みる
                 line = ser.readline().decode('ascii', errors='ignore').strip()
                 if line.startswith('$GPGGA') or line.startswith('$GPRMC'):
