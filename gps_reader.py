@@ -1,7 +1,7 @@
 import serial
 import pynmea2
 
-def get_gps_position(port='/dev/ttyUSB0', baudrate=4800):
+def get_gps_position(port='/dev/ttyUSB0', baudrate=9600):
     ser = serial.Serial(port, baudrate, timeout=1)
     while True:
         try:
