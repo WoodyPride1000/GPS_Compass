@@ -93,34 +93,21 @@
             update();
         });
 
+        // 特定のピクセル距離が何メートルに相当するかを計算する関数
+        function calculateDistanceForPixels(targetPixels) {
+            // 現在のマップの中心のレイヤーポイント（ピクセル座標）
+            const centerPoint = map.latLngToLayerPoint(map.getCenter());
+            // 中心からY軸方向（上方向）にtargetPixelsだけ移動したレイヤーポイント
+            const targetPoint = L.point(centerPoint.x, centerPoint.y - targetPixels);
+            // そのレイヤーポイントを地理座標（LatLng）に変換
+            const targetLatLng = map.layerPointToLatLng(targetPoint);
+            // 中心とターゲットLatLngの間の距離を計算（メートル）
+            return map.distance(map.getCenter(), targetLatLng);
+        }
+
         // ズーム変更時、またはウィンドウサイズ変更時にジオメトリのサイズを更新する関数
         function updateGeometrySizes() {
             const mapContainerHeight = map.getSize().y; // マップコンテナの現在の高さ（ピクセル）
-
-            // 1メートルあたりのピクセル数を概算する
-            // LeafletのCRS (Coordinate Reference System) に依存するが、
-            // OpenStreetMapのようなWeb Mercator (EPSG:3857) では
-            // ズームレベルごとにピクセルとメートルの関係が変わる
-            // より正確な計算には map.project() と map.unproject() が役立つ
-            // ここでは簡易的に、現在のズームレベルでの「1ピクセルあたりのメートル数」を求める
-            const centerLatLng = map.getCenter();
-            const point1 = map.latLngToLayerPoint(centerLatLng);
-            const point2 = map.latLngToLayerPoint(L.latLng(centerLatLng.lat + 0.00001, centerLatLng.lon));
-            const pixelsPerDegreeLat = Math.abs(point1.y - point2.y) / 0.00001; // 1緯度あたりのピクセル数
-            
-            // 1ピクセルあたりのメートルを計算 (これは非常に概算であり、緯度によって変化する)
-            // Leafletの内部的な `_projectLatlng` を模倣するが、`map.unproject` でピクセルからLatLngへ変換するのがより安全
-            const metersPerPixel = map.options.crs.scale(map.getZoom()) / (2 * Math.PI * 6378137); // これは不正確な計算、代わりに unproject を使う
-
-            // より正確な方法: 特定のピクセル距離が何メートルに相当するかを計算
-            // マップの中心から画面上方向に `targetPixels` ピクセル移動した場合の緯度差を求める
-            // その緯度差に対応するメートル距離を計算する
-            const calculateDistanceForPixels = (targetPixels) => {
-                const centerPixel = map.latLngToContainerPoint(map.getCenter());
-                const targetLatLon = map.containerPointToLatLng([centerPixel.x, centerPixel.y - targetPixels]);
-                // Haversine距離計算 (map.distance() を使用)
-                return map.distance(map.getCenter(), targetLatLon);
-            };
 
             // 目標とする画面上のピクセル数
             const targetHeadingLinePixels = mapContainerHeight * HEADING_LINE_SCREEN_RATIO;
@@ -130,11 +117,16 @@
             window.headingLineLength = calculateDistanceForPixels(targetHeadingLinePixels);
             window.fanShapeRadius = calculateDistanceForPixels(targetFanShapePixels);
 
-            // console.log(`Zoom: ${map.getZoom()}, Map Height: ${mapContainerHeight}px`);
-            // console.log(`Heading Line: ${window.headingLineLength.toFixed(2)}m (${targetHeadingLinePixels.toFixed(2)}px)`);
-            // console.log(`Fan Shape: ${window.fanShapeRadius.toFixed(2)}m (${targetFanShapePixels.toFixed(2)}px)`);
+            // デバッグログの強化
+            console.log(`--- updateGeometrySizes Called ---`);
+            console.log(`Map Height: ${mapContainerHeight}px`);
+            console.log(`Target Pixels for Heading Line (${HEADING_LINE_SCREEN_RATIO*100}%): ${targetHeadingLinePixels.toFixed(2)}px`);
+            console.log(`Calculated Heading Line Length: ${window.headingLineLength.toFixed(2)}m`);
+            console.log(`Target Pixels for Fan Shape (${FAN_SHAPE_SCREEN_RATIO*100}%): ${targetFanShapePixels.toFixed(2)}px`);
+            console.log(`Calculated Fan Shape Radius: ${window.fanShapeRadius.toFixed(2)}m`);
             
-            update(); // 距離が更新されたので、地図を再描画
+            // 距離が更新されたので、地図を再描画
+            update(); 
         }
 
         // 地図のズームが終了したときにジオメトリサイズを更新
@@ -185,9 +177,14 @@
                 map.setView([lat, lon]);
 
                 // 方位線と扇形の長さを計算 (updateGeometrySizesで計算され、window変数に格納されている)
-                // 距離は meters で計算されていることを確認
-                const currentHeadingLineLength = window.headingLineLength || 400; // fallback value
-                const currentFanShapeRadius = window.fanShapeRadius || 300;     // fallback value
+                // calculateDistanceForPixels で計算された値を直接使用
+                const currentHeadingLineLength = window.headingLineLength;
+                const currentFanShapeRadius = window.fanShapeRadius;
+
+                // ゼロやNaNになる場合のフォールバック値を設定 (念のため)
+                const safeHeadingLineLength = isNaN(currentHeadingLineLength) || currentHeadingLineLength === 0 ? 400 : currentHeadingLineLength;
+                const safeFanShapeRadius = isNaN(currentFanShapeRadius) || currentFanShapeRadius === 0 ? 300 : currentFanShapeRadius;
+
 
                 const R = 6378137; // 地球の半径 (メートル)
                 const bearingRad = heading * Math.PI / 180;
@@ -196,10 +193,10 @@
                 const lon1 = lon * Math.PI / 180;
 
                 // --- 方位線（可変長）の描画 ---
-                const lineLat2 = Math.asin(Math.sin(lat1) * Math.cos(currentHeadingLineLength / R) +
-                    Math.cos(lat1) * Math.sin(currentHeadingLineLength / R) * Math.cos(bearingRad));
-                const lineLon2 = lon1 + Math.atan2(Math.sin(bearingRad) * Math.sin(currentHeadingLineLength / R) * Math.cos(lat1),
-                    Math.cos(currentHeadingLineLength / R) - Math.sin(lat1) * Math.sin(lineLat2));
+                const lineLat2 = Math.asin(Math.sin(lat1) * Math.cos(safeHeadingLineLength / R) +
+                    Math.cos(lat1) * Math.sin(safeHeadingLineLength / R) * Math.cos(bearingRad));
+                const lineLon2 = lon1 + Math.atan2(Math.sin(bearingRad) * Math.sin(safeHeadingLineLength / R) * Math.cos(lat1),
+                    Math.cos(safeHeadingLineLength / R) - Math.sin(lat1) * Math.sin(lineLat2));
 
                 const endLat = lineLat2 * 180 / Math.PI;
                 const endLon = lineLon2 * 180 / Math.PI;
@@ -219,10 +216,10 @@
                     const angle = angleStart + (angleEnd - angleStart) * i / segments;
                     const angleRad = angle * Math.PI / 180;
 
-                    const fanLat2 = Math.asin(Math.sin(lat1) * Math.cos(currentFanShapeRadius / R) +
-                        Math.cos(lat1) * Math.sin(currentFanShapeRadius / R) * Math.cos(angleRad));
-                    const fanLon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(currentFanShapeRadius / R) * Math.cos(lat1),
-                        Math.cos(currentFanShapeRadius / R) - Math.sin(lat1) * Math.sin(fanLat2));
+                    const fanLat2 = Math.asin(Math.sin(lat1) * Math.cos(safeFanShapeRadius / R) +
+                        Math.cos(lat1) * Math.sin(safeFanShapeRadius / R) * Math.cos(angleRad));
+                    const fanLon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(safeFanShapeRadius / R) * Math.cos(lat1),
+                        Math.cos(safeFanShapeRadius / R) - Math.sin(lat1) * Math.sin(fanLat2));
 
                     latlngs.push([fanLat2 * 180 / Math.PI, fanLon2 * 180 / Math.PI]);
                 }
@@ -252,7 +249,8 @@
                 if (baseMarker) map.removeLayer(baseMarker);
                 if (headingLine) map.removeLayer(headingLine);
                 if (fanShape) map.removeLayer(fanShape);
-                baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map); // 再追加して初期状態に戻す
+                // エラー時にベースマーカーを初期位置に再描画（東京駅）
+                baseMarker = L.circleMarker([35.681236, 139.767125], { radius: 6, color: 'blue' }).addTo(map);
             });
         }
 
