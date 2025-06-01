@@ -2,11 +2,11 @@ from flask import Flask, render_template, jsonify
 import math
 import serial
 import pynmea2
-import mgrs
+# import mgrs
 import utm
 
 app = Flask(__name__)
-m = mgrs.MGRS()
+# m = mgrs.MGRS()
 
 def get_gps_position_with_hdop(device):
     try:
@@ -62,7 +62,7 @@ def api_position():
     return jsonify({
         "lat": base_lat,
         "lon": base_lon,
-        "mgrs": mgrs_str,
+#        "mgrs": mgrs_str,
         "utm": utm_str,
         "heading": fused_heading % 360,
         "distance": dist,
