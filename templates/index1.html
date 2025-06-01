@@ -7,6 +7,7 @@
     <style>
         #map { width: 100%; height: 400px; }
         button { margin: 5px; }
+        #dataInfo { margin-top: 10px; }
         #info { margin-top: 10px; max-height: 200px; overflow-y: auto; }
         .error { color: red; font-weight: bold; }
         .info { color: green; }
@@ -23,15 +24,16 @@
     <button id="logStopBtn" disabled>ログ停止</button>
     <button id="toggleCoordBtn">座標系: 緯度経度</button>
     <label for="intervalInput">更新間隔:</label>
-    <input type="number" id="intervalInput" value="1000" min="100" step="100"> ms
+    <input type="number" id="intervalInput" value="1000" min="100" max="60000" step="100"> ms
     <div id="map"></div>
+    <div id="dataInfo"></div>
     <div id="info"></div>
 
     <script>
     (() => {
         // 定数宣言
-        const METERS_PER_DEGREE = 111320; // 緯度1度あたりのメートル（近似値）
-        const MAX_INFO_MESSAGES = 20;      // info欄に表示する最大件数
+        const METERS_PER_DEGREE = 111320;
+        const MAX_INFO_MESSAGES = 20;
 
         // テンプレート変数
         const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
@@ -50,9 +52,17 @@
 
         // ズームレベルに応じた線や扇形サイズ
         function getBaselineLengthByZoom(zoom) {
+            if (zoom < 1 || zoom > 19) {
+                console.warn(`Invalid zoom level: ${zoom}`);
+                zoom = Math.min(Math.max(zoom, 1), 19);
+            }
             return Math.min(10, Math.max(0.1, 0.7 * Math.pow(1.2, 16 - zoom)));
         }
         function getSectorRadiusByZoom(zoom) {
+            if (zoom < 1 || zoom > 19) {
+                console.warn(`Invalid zoom level: ${zoom}`);
+                zoom = Math.min(Math.max(zoom, 1), 19);
+            }
             return Math.min(15, Math.max(0.2, 1.0 * Math.pow(1.2, 16 - zoom)));
         }
 
@@ -85,7 +95,6 @@
             const zoom = map.getZoom();
             const baselineLength = getBaselineLengthByZoom(zoom);
             const sectorRadius = getSectorRadiusByZoom(zoom);
-
             let lat2 = lat + (baselineLength * Math.cos(headingRad)) / METERS_PER_DEGREE;
             let lon2 = lon + (baselineLength * Math.sin(headingRad)) / (METERS_PER_DEGREE * Math.cos(lat * Math.PI / 180));
             baselineLine = L.polyline([[lat, lon], [lat2, lon2]], { color: 'red' }).addTo(overlayGroup);
@@ -99,8 +108,8 @@
             }
             sectorCircle = L.polygon([[lat, lon], ...sectorPoints], { color: 'orange', fillOpacity: 0.3 }).addTo(overlayGroup);
 
-            const infoDiv = document.getElementById("info");
-            infoDiv.innerHTML = '';
+            const dataInfoDiv = document.getElementById("dataInfo");
+            dataInfoDiv.innerHTML = '';
             const fields = [
                 { label: '座標系', value: currentCoordType },
                 { label: '緯度経度', value: `${data.lat.toFixed(7)}, ${data.lon.toFixed(7)}` },
@@ -113,18 +122,17 @@
             fields.forEach(field => {
                 const p = document.createElement('p');
                 p.innerHTML = `<b>${DOMPurify.sanitize(field.label)}:</b> ${DOMPurify.sanitize(field.value)}`;
-                infoDiv.appendChild(p);
+                dataInfoDiv.appendChild(p);
             });
         }
 
-        // info欄にメッセージ追加（最大数制御）
+        // メッセージ表示
         function showMessage(message, isError = false) {
             const infoDiv = document.getElementById("info");
             const msgDiv = document.createElement('div');
             msgDiv.className = isError ? 'error' : 'info';
             msgDiv.innerHTML = DOMPurify.sanitize(message);
             infoDiv.appendChild(msgDiv);
-            // 最大件数制御
             while (infoDiv.children.length > MAX_INFO_MESSAGES) {
                 infoDiv.removeChild(infoDiv.firstChild);
             }
@@ -133,14 +141,22 @@
 
         // センサーデータ取得
         async function fetchSensorData() {
-            try {
-                let res = await fetch("/get_data");
-                if (!res.ok) throw new Error(`データ取得に失敗しました: HTTPステータス ${res.status}`);
-                return await res.json();
-            } catch (e) {
-                console.error("Fetch error:", e);
-                showMessage(`エラー: センサーデータの取得に失敗しました: ${e.message}`, true);
-                return null;
+            const maxRetries = 3;
+            let attempts = 0;
+            while (attempts < maxRetries) {
+                try {
+                    let res = await fetch("/get_data");
+                    if (!res.ok) throw new Error(`データ取得に失敗しました: HTTPステータス ${res.status}`);
+                    return await res.json();
+                } catch (e) {
+                    attempts++;
+                    if (attempts === maxRetries) {
+                        console.error("Fetch error after retries:", e);
+                        showMessage(`エラー: センサーデータの取得に失敗しました（${attempts}回試行）: ${e.message}`, true);
+                        return null;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
             }
         }
 
@@ -152,9 +168,13 @@
             document.getElementById("intervalInput").disabled = true;
             showMessage("ログを開始しました。");
 
-            intervalId = setInterval(async () => {
+            async function loop() {
+                if (!logActive) return;
                 const data = await fetchSensorData();
-                if (!data) return;
+                if (!data) {
+                    intervalId = setTimeout(loop, intervalMs);
+                    return;
+                }
                 updateMapDisplay(data);
                 if (logActive) {
                     data.time = new Date().toISOString();
@@ -172,7 +192,9 @@
                         showMessage(`エラー: ログの記録に失敗しました: ${e.message}`, true);
                     }
                 }
-            }, intervalMs);
+                if (logActive) intervalId = setTimeout(loop, intervalMs);
+            }
+            loop();
         }
 
         // ログ停止
@@ -196,7 +218,8 @@
             if (data) updateMapDisplay(data);
         };
         document.getElementById("intervalInput").addEventListener("change", (e) => {
-            intervalMs = parseInt(e.target.value) || 1000;
+            let newInterval = parseInt(e.target.value) || 1000;
+            intervalMs = Math.min(Math.max(newInterval, 100), 60000);
             if (intervalId) {
                 clearInterval(intervalId);
                 intervalId = null;
