@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8" />
+    <title>GPS+IMU ログ＆表示</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        #map { width: 100%; height: 400px; }
+        button { margin: 5px; }
+        #info { margin-top: 10px; }
+        .error { color: red; font-weight: bold; }
+        .info { color: green; }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/proj4@2.8.0/dist/proj4.js"></script>
+</head>
+<body>
+    <h2>GPS+IMU ログ＆表示</h2>
+    <div><b>モード:</b> {{ 'ダミーモード' if dummy_mode else '実機モード' }}</div>
+    <button id="logStartBtn">ログ開始</button>
+    <button id="logStopBtn" disabled>ログ停止</button>
+    <button id="toggleCoordBtn">座標系: 緯度経度</button>
+    <input type="number" id="intervalInput" value="1000" min="100" step="100"> ms
+    <div id="map"></div>
+    <div id="info"></div>
+
+    <script>
+        const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
+        let map = L.map('map').setView([0, 0], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        let marker = L.marker([0, 0]).addTo(map);
+        let baselineLine = null;
+        let sectorCircle = null;
+        let logActive = false;
+        let currentCoordType = "latlon";
+        let intervalMs = 1000;
+
+        function getBaselineLengthByZoom(zoom) {
+            return 0.7 * Math.pow(1.2, 16 - zoom);
+        }
+        function getSectorRadiusByZoom(zoom) {
+            return 1.0 * Math.pow(1.2, 16 - zoom);
+        }
+
+        function latlonToUTM(lat, lon, zone) {
+            let proj4str = `+proj=utm +zone=${zone} +north +ellps=WGS84 +datum=WGS84 +units=m +no_defs`;
+            let utmCoord = proj4('WGS84', proj4str, [lon, lat]);
+            return { x: utmCoord[0], y: utmCoord[1] };
+        }
+        function utmToLatlon(x, y, zone) {
+            let proj4str = `+proj=utm +zone=${zone} +north +ellps=WGS84 +datum=WGS84 +units=m +no_defs`;
+            let latlon = proj4(proj4str, 'WGS84', [x, y]);
+            return { lat: latlon[1], lon: latlon[0] };
+        }
+
+        function updateMapDisplay(data) {
+            let lat = data.lat, lon = data.lon;
+            if (currentCoordType === "utm") {
+                let utm = latlonToUTM(data.lat, data.lon, data.utm_zone);
+                let latlon = utmToLatlon(utm.x, utm.y, data.utm_zone);
+                lat = latlon.lat;
+                lon = latlon.lon;
+            }
+            map.setView([lat, lon], map.getZoom());
+            marker.setLatLng([lat, lon]);
+
+            if (baselineLine) map.removeLayer(baselineLine);
+            if (sectorCircle) map.removeLayer(sectorCircle);
+
+            let headingRad = data.heading * Math.PI / 180;
+            const zoom = map.getZoom();
+            const baselineLength = getBaselineLengthByZoom(zoom);
+            const sectorRadius = getSectorRadiusByZoom(zoom);
+            let lat2 = lat + (baselineLength * Math.cos(headingRad)) / 111320;
+            let lon2 = lon + (baselineLength * Math.sin(headingRad)) / (111320 * Math.cos(lat * Math.PI / 180));
+            baselineLine = L.polyline([[lat, lon], [lat2, lon2]], { color: 'red' }).addTo(map);
+
+            let sectorPoints = [];
+            for (let angleDeg = data.heading - 10; angleDeg <= data.heading + 10; angleDeg += 2) {
+                let rad = angleDeg * Math.PI / 180;
+                let latp = lat + (sectorRadius * Math.cos(rad)) / 111320;
+                let lonp = lon + (sectorRadius * Math.sin(rad)) / (111320 * Math.cos(lat * Math.PI / 180));
+                sectorPoints.push([latp, lonp]);
+            }
+            sectorCircle = L.polygon([[lat, lon], ...sectorPoints], { color: 'orange', fillOpacity: 0.3 }).addTo(map);
+
+            document.getElementById("info").innerHTML = `
+                <b>座標系:</b> ${currentCoordType}<br/>
+                <b>緯度経度:</b> ${data.lat.toFixed(7)}, ${data.lon.toFixed(7)}<br/>
+                <b>UTM座標 (x,y):</b> ${data.utm_easting.toFixed(2)}, ${data.utm_northing.toFixed(2)} (Zone: ${data.utm_zone}${data.utm_letter})<br/>
+                <b>HDOP:</b> ${data.hdop}<br/>
+                <b>VDOP:</b> ${data.vdop}<br/>
+                <b>方位角:</b> ${data.heading}<br/>
+                <b>IMU (x,y,z):</b> ${data.imu_x.toFixed(3)}, ${data.imu_y.toFixed(3)}, ${data.imu_z.toFixed(3)}
+            `;
+        }
+
+        async function fetchSensorData() {
+            try {
+                let res = await fetch("/get_data");
+                if (!res.ok) throw new Error(`データ取得に失敗しました: HTTPステータス ${res.status}`);
+                return await res.json();
+            } catch (e) {
+                console.error("Fetch error:", e);
+                document.getElementById("info").innerHTML = `<div class="error">エラー: センサーデータの取得に失敗しました: ${e.message}</div>`;
+                return null;
+            }
+        }
+
+        let intervalId = null;
+
+        function startLogging() {
+            if (intervalId) return;
+            logActive = true;
+            document.getElementById("logStartBtn").disabled = true;
+            document.getElementById("logStopBtn").disabled = false;
+            document.getElementById("info").innerHTML += '<div class="info">ログを開始しました。</div>';
+
+            intervalId = setInterval(async () => {
+                const data = await fetchSensorData();
+                if (!data) return;
+                updateMapDisplay(data);
+                if (logActive) {
+                    data.time = new Date().toISOString();
+                    try {
+                        let res = await fetch("/log", {
+                            method: "POST",
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(data)
+                        });
+                        let result = await res.json();
+                        if (!res.ok) throw new Error(result.error || `ログ記録に失敗しました: HTTPステータス ${res.status}`);
+                        document.getElementById("info").innerHTML += '<div class="info">ログを記録しました。</div>';
+                    } catch (e) {
+                        console.error("Log error:", e);
+                        document.getElementById("info").innerHTML += `<div class="error">エラー: ログの記録に失敗しました: ${e.message}</div>`;
+                    }
+                }
+            }, intervalMs);
+        }
+
+        function stopLogging() {
+            logActive = false;
+            clearInterval(intervalId);
+            intervalId = null;
+            document.getElementById("logStartBtn").disabled = false;
+            document.getElementById("logStopBtn").disabled = true;
+            document.getElementById("info").innerHTML += '<div class="info">ログを停止しました。</div>';
+        }
+
+        document.getElementById("logStartBtn").onclick = startLogging;
+        document.getElementById("logStopBtn").onclick = stopLogging;
+        document.getElementById("toggleCoordBtn").onclick = () => {
+            currentCoordType = currentCoordType === "latlon" ? "utm" : "latlon";
+            document.getElementById("toggleCoordBtn").textContent = `座標系: ${currentCoordType === "latlon" ? "緯度経度" : "UTM"}`;
+        };
+        document.getElementById("intervalInput").addEventListener("change", (e) => {
+            intervalMs = parseInt(e.target.value) || 1000;
+            if (intervalId) {
+                clearInterval(intervalId);
+                startLogging();
+            }
+        });
+
+        window.onload = async () => {
+            const data = await fetchSensorData();
+            if (data) {
+                map.setView([data.lat, data.lon], 16);
+                updateMapDisplay(data);
+            }
+        };
+    </script>
+</body>
+</html>
