@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 GPS_BASE_PORT = '/dev/ttyUSB0'
 GPS_ROVER_PORT = '/dev/ttyUSB1'
-BAUDRATE = 9600 # このコードでは9600に変わっているので注意
+BAUDRATE = 4800 
 
 # データを保持するクラス
 class SensorData:
