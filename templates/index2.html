@@ -1,107 +1,90 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>GPS可視化</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-    <style>
-        #map { height: 90vh; }
-        .info-box {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(255,255,255,0.9);
-            padding: 10px;
-            z-index: 1000;
-            font-size: 14px;
-        }
-    </style>
+  <meta charset="utf-8">
+  <title>GPS可視化</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    #map { height: 90vh; }
+    .info-box {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 10px;
+      z-index: 1000;
+      font-size: 14px;
+    }
+  </style>
 </head>
 <body>
-    <div class="info-box">
-        <div>
-            <strong>位置情報形式:</strong>
-            <button onclick="setFormat('latlon')">緯度経度</button>
-            <button onclick="setFormat('utm')">UTM</button>
-        </div>
-        <div id="position-display"></div>
-        <div>方位角: <span id="heading"></span>°</div>
-        <div>基線誤差: <span id="error"></span> m</div>
-        <div>IMU使用: <span id="imu"></span></div>
-        <div>HDOP（基準局）: <span id="hdop_base"></span></div>
-        <div>HDOP（移動局）: <span id="hdop_rover"></span></div>
-    </div>
-    <div id="map"></div>
+  <div class="info-box">
+    <div>緯度: <span id="lat"></span></div>
+    <div>経度: <span id="lon"></span></div>
+    <div>方位角: <span id="heading"></span>°</div>
+    <div>基線誤差: <span id="error"></span> m</div>
+    <div>IMU使用: <span id="imu"></span></div>
+    <div>HDOP（基準局）: <span id="hdop_base"></span></div>
+    <div>HDOP（移動局）: <span id="hdop_rover"></span></div>
+  </div>
+  <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-    <script>
-        let map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 18);
-        L.control.zoom({ position: 'bottomright' }).addTo(map);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; OpenStreetMap contributors'
-        }).addTo(map);
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 18);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
 
-        let baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map);
-        let headingLine = L.polyline([[0, 0], [0, 0]], { color: 'pink', weight: 2 }).addTo(map);
+    const baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map);
+    let headingLine = L.polyline([[0, 0], [0, 0]], { color: 'pink', weight: 2 }).addTo(map);
 
-        let positionFormat = 'latlon';
+    function update() {
+      fetch('/api/position')
+        .then(res => res.json())
+        .then(data => {
+          const lat = data.lat, lon = data.lon;
+          const heading = data.heading;
+          const error = data.error;
+          const imu = data.imu;
+          const hdop_base = data.hdop_base;
+          const hdop_rover = data.hdop_rover;
 
-        function setFormat(fmt) {
-            positionFormat = fmt;
-            update();
-        }
+          document.getElementById("lat").textContent = lat.toFixed(6);
+          document.getElementById("lon").textContent = lon.toFixed(6);
+          document.getElementById("heading").textContent = heading.toFixed(1);
+          document.getElementById("error").textContent = error.toFixed(2);
+          document.getElementById("imu").textContent = imu ? "使用中" : "なし";
+          document.getElementById("hdop_base").textContent = hdop_base.toFixed(1);
+          document.getElementById("hdop_rover").textContent = hdop_rover.toFixed(1);
 
-        function update() {
-            fetch('/api/position')
-                .then(res => res.json())
-                .then(data => {
-                    const lat = data.lat, lon = data.lon;
-                    const mgrs = data.mgrs, utm = data.utm;
+          baseMarker.setLatLng([lat, lon]);
 
-                    // 座標形式の表示切替
-                    if (positionFormat === 'latlon') {
-                        document.getElementById("position-display").innerHTML = `緯度: ${lat.toFixed(6)}, 経度: ${lon.toFixed(6)}`;
-                    } else if (positionFormat === 'mgrs') {
-                        document.getElementById("position-display").innerHTML = `MGRS: ${mgrs}`;
-                    } else if (positionFormat === 'utm') {
-                        document.getElementById("position-display").innerHTML = `UTM: ${utm}`;
-                    }
+          // === 地図の幅を元に線の長さを決める ===
+          const bounds = map.getBounds();
+          const center = map.getCenter();
 
-                    // 数値情報表示
-                    document.getElementById("heading").textContent = data.heading.toFixed(1);
-                    document.getElementById("error").textContent = data.error.toFixed(2);
-                    document.getElementById("imu").textContent = data.imu ? "使用中" : "なし";
-                    document.getElementById("hdop_base").textContent = data.hdop_base.toFixed(1);
-                    document.getElementById("hdop_rover").textContent = data.hdop_rover.toFixed(1);
+          const latDiff = bounds.getNorth() - bounds.getSouth();
+          const approxMetersPerDeg = 111320;
+          const rangeMeters = latDiff * approxMetersPerDeg;
+          const distance = rangeMeters * 0.3;
 
-                    // マップ表示更新
-                    baseMarker.setLatLng([lat, lon]);
-                    map.setView([lat, lon]);
+          const angleRad = heading * Math.PI / 180;
+          const dx = (distance * Math.sin(angleRad)) / approxMetersPerDeg;
+          const dy = (distance * Math.cos(angleRad)) / approxMetersPerDeg;
 
-                    // 方位角の200m線の終点を計算
-                    const R = 6378137; // 地球半径[m]
-                    const headingRad = data.heading * Math.PI / 180;
-                    const distance = 200; // 表示距離[m]
+          const endLat = lat + dy;
+          const endLon = lon + dx;
 
-                    const lat1 = lat * Math.PI / 180;
-                    const lon1 = lon * Math.PI / 180;
+          headingLine.setLatLngs([[lat, lon], [endLat, endLon]]);
+          map.setView([lat, lon]);
+        });
+    }
 
-                    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / R) +
-                        Math.cos(lat1) * Math.sin(distance / R) * Math.cos(headingRad));
-                    const lon2 = lon1 + Math.atan2(Math.sin(headingRad) * Math.sin(distance / R) * Math.cos(lat1),
-                        Math.cos(distance / R) - Math.sin(lat1) * Math.sin(lat2));
-
-                    const endLat = lat2 * 180 / Math.PI;
-                    const endLon = lon2 * 180 / Math.PI;
-
-                    // 方位線更新
-                    headingLine.setLatLngs([[lat, lon], [endLat, endLon]]);
-                });
-        }
-
-        setInterval(update, 2000);
-        update();
-    </script>
+    setInterval(update, 2000);
+    update();
+  </script>
 </body>
 </html>
