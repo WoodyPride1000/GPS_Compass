@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>GPS可視化</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        html, body {
+            height: 100%; /* HTMLとBodyがビューポートの全高を使用するように */
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* スクロールバーを非表示 */
+        }
+        #map {
+            height: 100vh; /* ビューポートの高さ全体を使用 */
+            width: 100vw; /* ビューポートの幅全体を使用 */
+        }
+        .info-box {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            z-index: 1000;
+            font-size: 14px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            color: #333; /* 文字色を濃く */
+        }
+        .info-box div {
+            margin-bottom: 3px;
+        }
+        #slider-box {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            z-index: 1000;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        #status-message {
+            color: red;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="info-box">
+        <div>緯度: <span id="lat">--</span></div>
+        <div>経度: <span id="lon">--</span></div>
+        <div>方位角: <span id="heading">--</span>°</div>
+        <div>基線誤差: <span id="error">--</span> m</div>
+        <div>IMU使用: <span id="imu">--</span></div>
+        <div>HDOP（基準局）: <span id="hdop_base">--</span></div>
+        <div>HDOP（移動局）: <span id="hdop_rover">--</span></div>
+        <div id="status-message"></div>
+    </div>
+
+    <div id="slider-box">
+        <label for="fanSlider">角度幅: <span id="fanValue">45</span>°</label><br>
+        <input type="range" id="fanSlider" min="0" max="90" value="45">
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        // 東京駅を初期中心に設定。データ受信後に自動で移動。
+        let map = L.map('map', { zoomControl: false, center: [35.681236, 139.767125], zoom: 18 });
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map);
+        let headingLine = null;
+        let fanShape = null;
+        let fanAngle = 45;
+        let initialViewSet = false; // 初期ビューがGPSデータに基づいて設定されたかを示すフラグ
+
+        // 画面の縦サイズに対する割合 (0.0 - 1.0)
+        const HEADING_LINE_SCREEN_RATIO = 0.40; // 方位角線 40%
+        const FAN_SHAPE_SCREEN_RATIO = 0.30;   // 扇形 30%
+
+        // スライダーの値が変更されたときに扇形の角度を更新
+        document.getElementById("fanSlider").addEventListener("input", () => {
+            fanAngle = parseInt(document.getElementById("fanSlider").value);
+            document.getElementById("fanValue").textContent = fanAngle;
+            // 角度が変わっただけなので、update() を呼び出して再描画
+            update();
+        });
+
+        // ズーム変更時、またはウィンドウサイズ変更時にジオメトリのサイズを更新する関数
+        function updateGeometrySizes() {
+            const mapContainerHeight = map.getSize().y; // マップコンテナの現在の高さ（ピクセル）
+
+            // 1メートルあたりのピクセル数を概算する
+            // LeafletのCRS (Coordinate Reference System) に依存するが、
+            // OpenStreetMapのようなWeb Mercator (EPSG:3857) では
+            // ズームレベルごとにピクセルとメートルの関係が変わる
+            // より正確な計算には map.project() と map.unproject() が役立つ
+            // ここでは簡易的に、現在のズームレベルでの「1ピクセルあたりのメートル数」を求める
+            const centerLatLng = map.getCenter();
+            const point1 = map.latLngToLayerPoint(centerLatLng);
+            const point2 = map.latLngToLayerPoint(L.latLng(centerLatLng.lat + 0.00001, centerLatLng.lon));
+            const pixelsPerDegreeLat = Math.abs(point1.y - point2.y) / 0.00001; // 1緯度あたりのピクセル数
+            
+            // 1ピクセルあたりのメートルを計算 (これは非常に概算であり、緯度によって変化する)
+            // Leafletの内部的な `_projectLatlng` を模倣するが、`map.unproject` でピクセルからLatLngへ変換するのがより安全
+            const metersPerPixel = map.options.crs.scale(map.getZoom()) / (2 * Math.PI * 6378137); // これは不正確な計算、代わりに unproject を使う
+
+            // より正確な方法: 特定のピクセル距離が何メートルに相当するかを計算
+            // マップの中心から画面上方向に `targetPixels` ピクセル移動した場合の緯度差を求める
+            // その緯度差に対応するメートル距離を計算する
+            const calculateDistanceForPixels = (targetPixels) => {
+                const centerPixel = map.latLngToContainerPoint(map.getCenter());
+                const targetLatLon = map.containerPointToLatLng([centerPixel.x, centerPixel.y - targetPixels]);
+                // Haversine距離計算 (map.distance() を使用)
+                return map.distance(map.getCenter(), targetLatLon);
+            };
+
+            // 目標とする画面上のピクセル数
+            const targetHeadingLinePixels = mapContainerHeight * HEADING_LINE_SCREEN_RATIO;
+            const targetFanShapePixels = mapContainerHeight * FAN_SHAPE_SCREEN_RATIO;
+
+            // 目標とする地理的な距離（メートル）
+            window.headingLineLength = calculateDistanceForPixels(targetHeadingLinePixels);
+            window.fanShapeRadius = calculateDistanceForPixels(targetFanShapePixels);
+
+            // console.log(`Zoom: ${map.getZoom()}, Map Height: ${mapContainerHeight}px`);
+            // console.log(`Heading Line: ${window.headingLineLength.toFixed(2)}m (${targetHeadingLinePixels.toFixed(2)}px)`);
+            // console.log(`Fan Shape: ${window.fanShapeRadius.toFixed(2)}m (${targetFanShapePixels.toFixed(2)}px)`);
+            
+            update(); // 距離が更新されたので、地図を再描画
+        }
+
+        // 地図のズームが終了したときにジオメトリサイズを更新
+        map.on('zoomend', updateGeometrySizes);
+        // ウィンドウのサイズが変更されたときにもジオメトリサイズを更新
+        window.addEventListener('resize', updateGeometrySizes);
+
+
+        function update() {
+            const statusMessageElement = document.getElementById("status-message");
+            statusMessageElement.textContent = ""; // メッセージをクリア
+
+            fetch('/api/position')
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error(`HTTPエラー! ステータス: ${res.status}`);
+                }
+                return res.json();
+            })
+            .then(data => {
+                const lat = data.lat;
+                const lon = data.lon;
+                const heading = data.heading; // app.pyから直接fused_headingを受け取る
+                const error = data.error;
+                const imuStatus = data.imu; // app.pyから 'imu' を受け取る
+                const hdop_base = data.hdop_base;
+                const hdop_rover = data.hdop_rover;
+
+                // 取得したデータをUIに表示
+                document.getElementById("lat").textContent = lat.toFixed(6);
+                document.getElementById("lon").textContent = lon.toFixed(6);
+                document.getElementById("heading").textContent = heading.toFixed(1);
+                document.getElementById("error").textContent = error.toFixed(2);
+                document.getElementById("imu").textContent = imuStatus ? "使用中" : "なし";
+                document.getElementById("hdop_base").textContent = hdop_base.toFixed(1);
+                document.getElementById("hdop_rover").textContent = hdop_rover.toFixed(1);
+
+                // ベースマーカーの位置を更新
+                baseMarker.setLatLng([lat, lon]);
+
+                // 初めて有効なGPSデータを受信した場合に地図の中心を設定
+                if (!initialViewSet && (lat !== 0.0 || lon !== 0.0)) {
+                    map.setView([lat, lon], map.getZoom());
+                    initialViewSet = true;
+                }
+                
+                // 現在位置に地図の中心を常に追従させる
+                map.setView([lat, lon]);
+
+                // 方位線と扇形の長さを計算 (updateGeometrySizesで計算され、window変数に格納されている)
+                // 距離は meters で計算されていることを確認
+                const currentHeadingLineLength = window.headingLineLength || 400; // fallback value
+                const currentFanShapeRadius = window.fanShapeRadius || 300;     // fallback value
+
+                const R = 6378137; // 地球の半径 (メートル)
+                const bearingRad = heading * Math.PI / 180;
+
+                const lat1 = lat * Math.PI / 180;
+                const lon1 = lon * Math.PI / 180;
+
+                // --- 方位線（可変長）の描画 ---
+                const lineLat2 = Math.asin(Math.sin(lat1) * Math.cos(currentHeadingLineLength / R) +
+                    Math.cos(lat1) * Math.sin(currentHeadingLineLength / R) * Math.cos(bearingRad));
+                const lineLon2 = lon1 + Math.atan2(Math.sin(bearingRad) * Math.sin(currentHeadingLineLength / R) * Math.cos(lat1),
+                    Math.cos(currentHeadingLineLength / R) - Math.sin(lat1) * Math.sin(lineLat2));
+
+                const endLat = lineLat2 * 180 / Math.PI;
+                const endLon = lineLon2 * 180 / Math.PI;
+
+                if (headingLine) map.removeLayer(headingLine);
+                headingLine = L.polyline([[lat, lon], [endLat, endLon]], {
+                    color: "red", weight: 2
+                }).addTo(map);
+
+                // --- 扇形マスク（可変半径）の描画 ---
+                const angleStart = heading - fanAngle / 2;
+                const angleEnd = heading + fanAngle / 2;
+                const segments = 30; // 扇形を構成するセグメント数
+                const latlngs = [[lat, lon]]; // 中心点から開始
+
+                for (let i = 0; i <= segments; i++) {
+                    const angle = angleStart + (angleEnd - angleStart) * i / segments;
+                    const angleRad = angle * Math.PI / 180;
+
+                    const fanLat2 = Math.asin(Math.sin(lat1) * Math.cos(currentFanShapeRadius / R) +
+                        Math.cos(lat1) * Math.sin(currentFanShapeRadius / R) * Math.cos(angleRad));
+                    const fanLon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(currentFanShapeRadius / R) * Math.cos(lat1),
+                        Math.cos(currentFanShapeRadius / R) - Math.sin(lat1) * Math.sin(fanLat2));
+
+                    latlngs.push([fanLat2 * 180 / Math.PI, fanLon2 * 180 / Math.PI]);
+                }
+                latlngs.push([lat, lon]); // 扇形を閉じるため、再度中心点を追加
+
+                if (fanShape) map.removeLayer(fanShape);
+                fanShape = L.polygon(latlngs, {
+                    color: "green",
+                    fillColor: "green",
+                    fillOpacity: 0.3,
+                    weight: 1
+                }).addTo(map);
+            })
+            .catch(error => {
+                console.error('データの取得に失敗しました:', error);
+                // UI上にエラーメッセージを表示
+                statusMessageElement.textContent = `エラー: ${error.message}`;
+                // データの表示をクリア、またはエラー状態を示す値にする
+                document.getElementById("lat").textContent = "--";
+                document.getElementById("lon").textContent = "--";
+                document.getElementById("heading").textContent = "--";
+                document.getElementById("error").textContent = "--";
+                document.getElementById("imu").textContent = "--";
+                document.getElementById("hdop_base").textContent = "--";
+                document.getElementById("hdop_rover").textContent = "--";
+                // マーカーやシェイプを非表示にする
+                if (baseMarker) map.removeLayer(baseMarker);
+                if (headingLine) map.removeLayer(headingLine);
+                if (fanShape) map.removeLayer(fanShape);
+                baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map); // 再追加して初期状態に戻す
+            });
+        }
+
+        // 初期ロード時と2秒ごとにデータを更新
+        // updateGeometrySizesを呼び出すことで、初期の線と扇形も正しく計算される
+        updateGeometrySizes(); // 初回実行で線の長さを計算
+        setInterval(update, 2000);
+    </script>
+</body>
+</html>
