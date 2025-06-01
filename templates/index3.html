@@ -15,6 +15,11 @@
             padding: 10px;
             z-index: 1000;
             font-size: 14px;
+            border-radius: 5px; /* 少し丸みを追加 */
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2); /* 影を追加 */
+        }
+        .info-box div {
+            margin-bottom: 3px;
         }
         #slider-box {
             position: absolute;
@@ -23,19 +28,21 @@
             background: rgba(255,255,255,0.9);
             padding: 10px;
             z-index: 1000;
+            border-radius: 5px; /* 少し丸みを追加 */
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2); /* 影を追加 */
         }
     </style>
 </head>
 <body>
     <div class="info-box">
-        <div>緯度: <span id="lat"></span></div>
-        <div>経度: <span id="lon"></span></div>
+        <div>緯度: <span id="lat">--</span></div>
+        <div>経度: <span id="lon">--</span></div>
         <div>方位角: <span id="heading">--</span>°</div>
         <div>基線誤差: <span id="error">--</span> m</div>
         <div>IMU使用: <span id="imu">--</span></div>
         <div>HDOP（基準局）: <span id="hdop_base">--</span></div>
         <div>HDOP（移動局）: <span id="hdop_rover">--</span></div>
-    </div>
+        <div style="color: red;" id="status-message"></div> </div>
 
     <div id="slider-box">
         <label for="fanSlider">角度幅: <span id="fanValue">45</span>°</label><br>
@@ -46,6 +53,7 @@
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
+        // 東京駅を初期中心に設定。データ受信後に自動で移動。
         let map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 18);
         L.control.zoom({ position: 'bottomright' }).addTo(map);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -56,39 +64,65 @@
         let headingLine = null;
         let fanShape = null;
         let fanAngle = 45;
+        let initialViewSet = false; // 初期ビューがGPSデータに基づいて設定されたかを示すフラグ
 
+        // スライダーの値が変更されたときに扇形の角度を更新し、地図を再描画
         document.getElementById("fanSlider").addEventListener("input", () => {
             fanAngle = parseInt(document.getElementById("fanSlider").value);
             document.getElementById("fanValue").textContent = fanAngle;
-            update(); // 再描画
+            update(); // スライダー操作時も即座に更新
         });
 
         function update() {
+            const statusMessageElement = document.getElementById("status-message");
+            statusMessageElement.textContent = ""; // メッセージをクリア
+
             fetch('/api/position')
-            .then(res => res.json())
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error(`HTTPエラー! ステータス: ${res.status}`);
+                }
+                return res.json();
+            })
             .then(data => {
-                const lat = data.lat, lon = data.lon;
-                const heading = data.heading;
+                const lat = data.lat;
+                const lon = data.lon;
+                // Python側のAPIがheading_combinedを返すことを想定
+                const heading = data.heading_combined !== undefined ? data.heading_combined : data.heading; 
                 const error = data.error;
-                const imu = data.imu;
+                const imuStatus = data.imu_status !== undefined ? data.imu_status : data.imu; // imu_statusを優先、なければimu
                 const hdop_base = data.hdop_base;
                 const hdop_rover = data.hdop_rover;
 
+                // 取得したデータをUIに表示
+                document.getElementById("lat").textContent = lat.toFixed(6);
+                document.getElementById("lon").textContent = lon.toFixed(6);
                 document.getElementById("heading").textContent = heading.toFixed(1);
                 document.getElementById("error").textContent = error.toFixed(2);
-                document.getElementById("imu").textContent = imu ? "使用中" : "なし";
+                document.getElementById("imu").textContent = imuStatus ? "使用中" : "なし";
                 document.getElementById("hdop_base").textContent = hdop_base.toFixed(1);
                 document.getElementById("hdop_rover").textContent = hdop_rover.toFixed(1);
 
+                // ベースマーカーの位置を更新
                 baseMarker.setLatLng([lat, lon]);
 
-                // 方位線（約400m = 地図の40%）
-                const R = 6378137;
+                // 初めて有効なGPSデータを受信した場合に地図の中心を設定
+                if (!initialViewSet && (lat !== 0.0 || lon !== 0.0)) {
+                    map.setView([lat, lon], map.getZoom());
+                    initialViewSet = true;
+                }
+                
+                // 現在位置に地図の中心を常に追従させる（ユーザーが地図を動かしても戻る動作）
+                map.setView([lat, lon]);
+
+                // 方位線（約400m）の描画
+                const R = 6378137; // 地球の半径 (メートル)
                 const bearingRad = heading * Math.PI / 180;
-                const distLine = 400;
+                const distLine = 400; // 方位線の長さ (メートル)
 
                 const lat1 = lat * Math.PI / 180;
                 const lon1 = lon * Math.PI / 180;
+
                 const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distLine / R) +
                     Math.cos(lat1) * Math.sin(distLine / R) * Math.cos(bearingRad));
                 const lon2 = lon1 + Math.atan2(Math.sin(bearingRad) * Math.sin(distLine / R) * Math.cos(lat1),
@@ -102,25 +136,25 @@
                     color: "red", weight: 2
                 }).addTo(map);
 
-                // 扇形マスク（約300m = 地図の30%）
-                const fanRadius = 300;
+                // 扇形マスク（約300m）の描画
+                const fanRadius = 300; // 扇形の半径 (メートル)
                 const angleStart = heading - fanAngle / 2;
                 const angleEnd = heading + fanAngle / 2;
-                const segments = 30;
-                const latlngs = [[lat, lon]];
+                const segments = 30; // 扇形を構成するセグメント数
+                const latlngs = [[lat, lon]]; // 中心点から開始
 
                 for (let i = 0; i <= segments; i++) {
                     const angle = angleStart + (angleEnd - angleStart) * i / segments;
                     const angleRad = angle * Math.PI / 180;
 
-                    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(fanRadius / R) +
+                    const fanLat2 = Math.asin(Math.sin(lat1) * Math.cos(fanRadius / R) +
                         Math.cos(lat1) * Math.sin(fanRadius / R) * Math.cos(angleRad));
-                    const lon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(fanRadius / R) * Math.cos(lat1),
-                        Math.cos(fanRadius / R) - Math.sin(lat1) * Math.sin(lat2));
+                    const fanLon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(fanRadius / R) * Math.cos(lat1),
+                        Math.cos(fanRadius / R) - Math.sin(lat1) * Math.sin(fanLat2));
 
-                    latlngs.push([lat2 * 180 / Math.PI, lon2 * 180 / Math.PI]);
+                    latlngs.push([fanLat2 * 180 / Math.PI, fanLon2 * 180 / Math.PI]);
                 }
-                latlngs.push([lat, lon]);
+                latlngs.push([lat, lon]); // 扇形を閉じるため、再度中心点を追加
 
                 if (fanShape) map.removeLayer(fanShape);
                 fanShape = L.polygon(latlngs, {
@@ -129,12 +163,32 @@
                     fillOpacity: 0.3,
                     weight: 1
                 }).addTo(map);
-
-                map.setView([lat, lon]);
+            })
+            .catch(error => {
+                console.error('データの取得に失敗しました:', error);
+                // UI上にエラーメッセージを表示
+                statusMessageElement.textContent = `エラー: ${error.message}`;
+                // データの表示をクリア、またはエラー状態を示す値にする
+                document.getElementById("lat").textContent = "--";
+                document.getElementById("lon").textContent = "--";
+                document.getElementById("heading").textContent = "--";
+                document.getElementById("error").textContent = "--";
+                document.getElementById("imu").textContent = "--";
+                document.getElementById("hdop_base").textContent = "--";
+                document.getElementById("hdop_rover").textContent = "--";
+                // マーカーやシェイプを非表示にする
+                if (baseMarker) map.removeLayer(baseMarker);
+                if (headingLine) map.removeLayer(headingLine);
+                if (fanShape) map.removeLayer(fanShape);
+                baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map); // 再追加して初期状態に戻す
             });
         }
 
+        // 2秒ごとにデータを更新
         setInterval(update, 2000);
+
+        // ページロード時に一度更新を呼び出す
+        update();
     </script>
 </body>
 </html>
