@@ -34,6 +34,7 @@
         <div>HDOP（移動局）: <span id="hdop_rover"></span></div>
     </div>
     <div id="map"></div>
+
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
         let map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 18);
@@ -42,8 +43,8 @@
             attribution: '&copy; OpenStreetMap contributors'
         }).addTo(map);
 
-        let baseMarker = L.circleMarker([0,0], {radius:6, color:'blue'}).addTo(map);
-        let headingLine = L.polyline([[0,0],[0,0]], {color:'red'}).addTo(map);
+        let baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map);
+        let headingLine = L.polyline([[0, 0], [0, 0]], { color: 'pink', weight: 2 }).addTo(map);
 
         let positionFormat = 'latlon';
 
@@ -54,32 +55,50 @@
 
         function update() {
             fetch('/api/position')
-            .then(res => res.json())
-            .then(data => {
-                const lat = data.lat, lon = data.lon;
-                const mgrs = data.mgrs, utm = data.utm;
+                .then(res => res.json())
+                .then(data => {
+                    const lat = data.lat, lon = data.lon;
+                    const mgrs = data.mgrs, utm = data.utm;
 
-                if (positionFormat === 'latlon') {
-                    document.getElementById("position-display").innerHTML = `緯度: ${lat.toFixed(6)}, 経度: ${lon.toFixed(6)}`;
-                } else if (positionFormat === 'mgrs') {
-                    document.getElementById("position-display").innerHTML = `MGRS: ${mgrs}`;
-                } else if (positionFormat === 'utm') {
-                    document.getElementById("position-display").innerHTML = `UTM: ${utm}`;
-                }
+                    // 座標形式の表示切替
+                    if (positionFormat === 'latlon') {
+                        document.getElementById("position-display").innerHTML = `緯度: ${lat.toFixed(6)}, 経度: ${lon.toFixed(6)}`;
+                    } else if (positionFormat === 'mgrs') {
+                        document.getElementById("position-display").innerHTML = `MGRS: ${mgrs}`;
+                    } else if (positionFormat === 'utm') {
+                        document.getElementById("position-display").innerHTML = `UTM: ${utm}`;
+                    }
 
-                document.getElementById("heading").textContent = data.heading.toFixed(1);
-                document.getElementById("error").textContent = data.error.toFixed(2);
-                document.getElementById("imu").textContent = data.imu ? "使用中" : "なし";
-                document.getElementById("hdop_base").textContent = data.hdop_base.toFixed(1);
-                document.getElementById("hdop_rover").textContent = data.hdop_rover.toFixed(1);
+                    // 数値情報表示
+                    document.getElementById("heading").textContent = data.heading.toFixed(1);
+                    document.getElementById("error").textContent = data.error.toFixed(2);
+                    document.getElementById("imu").textContent = data.imu ? "使用中" : "なし";
+                    document.getElementById("hdop_base").textContent = data.hdop_base.toFixed(1);
+                    document.getElementById("hdop_rover").textContent = data.hdop_rover.toFixed(1);
 
-                baseMarker.setLatLng([lat, lon]);
-                const angleRad = data.heading * Math.PI / 180;
-                const dx = 0.0003 * Math.sin(angleRad);
-                const dy = 0.0003 * Math.cos(angleRad);
-                headingLine.setLatLngs([[lat, lon], [lat + dx, lon + dy]]);
-                map.setView([lat, lon]);
-            });
+                    // マップ表示更新
+                    baseMarker.setLatLng([lat, lon]);
+                    map.setView([lat, lon]);
+
+                    // 方位角の200m線の終点を計算
+                    const R = 6378137; // 地球半径[m]
+                    const headingRad = data.heading * Math.PI / 180;
+                    const distance = 200; // 表示距離[m]
+
+                    const lat1 = lat * Math.PI / 180;
+                    const lon1 = lon * Math.PI / 180;
+
+                    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / R) +
+                        Math.cos(lat1) * Math.sin(distance / R) * Math.cos(headingRad));
+                    const lon2 = lon1 + Math.atan2(Math.sin(headingRad) * Math.sin(distance / R) * Math.cos(lat1),
+                        Math.cos(distance / R) - Math.sin(lat1) * Math.sin(lat2));
+
+                    const endLat = lat2 * 180 / Math.PI;
+                    const endLon = lon2 * 180 / Math.PI;
+
+                    // 方位線更新
+                    headingLine.setLatLngs([[lat, lon], [endLat, endLon]]);
+                });
         }
 
         setInterval(update, 1000);
