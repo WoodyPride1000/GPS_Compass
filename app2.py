@@ -55,7 +55,7 @@ def api_position():
     else:
         fused_heading = gps_heading
 
-    mgrs_str = m.toMGRS(base_lat, base_lon)
+#    mgrs_str = m.toMGRS(base_lat, base_lon)
     utm_e, utm_n, utm_zone, utm_letter = utm.from_latlon(base_lat, base_lon)
     utm_str = f"{utm_zone}{utm_letter} {utm_e:.2f}E {utm_n:.2f}N"
 
