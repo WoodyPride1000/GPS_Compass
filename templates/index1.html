@@ -4,18 +4,28 @@
     <meta charset="UTF-8" />
     <title>GPS+IMU ログ＆表示</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <style>
         #map { width: 100%; height: 400px; }
-        button { margin: 5px; }
+        button, select, input { margin: 5px; }
         #dataInfo { margin-top: 10px; }
         #info { margin-top: 10px; max-height: 200px; overflow-y: auto; }
+        #logTable { margin-top: 10px; border-collapse: collapse; width: 100%; }
+        #logTable th, #logTable td { border: 1px solid #ddd; padding: 8px; }
+        #chartContainer { margin-top: 10px; }
         .error { color: red; font-weight: bold; }
         .info { color: green; }
+        @media (max-width: 600px) {
+            #map { height: 300px; }
+            button, select, input { width: 100%; margin: 5px 0; box-sizing: border-box; }
+            #dataInfo, #info, #logTable { font-size: 14px; }
+        }
     </style>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/proj4@2.8.0/dist/proj4.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/2.4.1/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
 </head>
 <body>
     <h2>GPS+IMU ログ＆表示</h2>
@@ -23,10 +33,20 @@
     <button id="logStartBtn">ログ開始</button>
     <button id="logStopBtn" disabled>ログ停止</button>
     <button id="toggleCoordBtn">座標系: 緯度経度</button>
+    <button id="toggleTrajectoryBtn">軌跡表示: OFF</button>
     <label for="intervalInput">更新間隔:</label>
     <input type="number" id="intervalInput" value="1000" min="100" max="60000" step="100"> ms
+    <label for="deviceSelect">デバイス:</label>
+    <select id="deviceSelect">
+        <option value="device1">Device 1</option>
+        <option value="device2">Device 2</option>
+    </select>
+    <label for="logFileSelect">ログファイル:</label>
+    <select id="logFileSelect"><option value="">ログを選択</option></select>
     <div id="map"></div>
     <div id="dataInfo"></div>
+    <div id="chartContainer"><canvas id="logChart"></canvas></div>
+    <table id="logTable"><thead><tr><th>時間</th><th>デバイス</th><th>緯度</th><th>経度</th><th>方位角</th></tr></thead><tbody></tbody></table>
     <div id="info"></div>
 
     <script>
@@ -34,7 +54,6 @@
         // 定数宣言
         const METERS_PER_DEGREE = 111320;
         const MAX_INFO_MESSAGES = 20;
-        // ベースライン・扇形サイズ算出用定数
         const BASELINE_BASE = 0.7;
         const BASELINE_EXP = 1.2;
         const BASELINE_MAX = 10;
@@ -47,16 +66,22 @@
         // テンプレート変数
         const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
         // 状態変数
-        let map, overlayGroup, marker, baselineLine, sectorCircle;
-        let logActive = false, currentCoordType = "latlon";
-        let intervalMs = 1000, intervalId = null;
+        let map, overlayGroup, marker, baselineLine, sectorCircle, trajectoryLayer;
+        let logActive = false, currentCoordType = "latlon", showTrajectory = false;
+        let intervalMs = 1000, intervalId = null, lastData = null;
+        let chart = null;
 
         // 地図初期化
         function initMap() {
             map = L.map('map').setView([0, 0], 16);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
             overlayGroup = L.layerGroup().addTo(map);
+            trajectoryLayer = L.layerGroup().addTo(map);
             marker = L.marker([0, 0]).addTo(overlayGroup);
+            map.on('zoomend', async () => {
+                const data = await fetchSensorData();
+                if (data) updateMapDisplay(data);
+            });
         }
 
         // ズームレベルに応じた線や扇形サイズ
@@ -120,6 +145,7 @@
             const dataInfoDiv = document.getElementById("dataInfo");
             dataInfoDiv.innerHTML = '';
             const fields = [
+                { label: 'デバイス', value: data.device_id },
                 { label: '座標系', value: currentCoordType },
                 { label: '緯度経度', value: `${data.lat.toFixed(7)}, ${data.lon.toFixed(7)}` },
                 { label: 'UTM座標 (x,y)', value: `${data.utm_easting.toFixed(2)}, ${data.utm_northing.toFixed(2)} (Zone: ${data.utm_zone}${data.utm_letter})` },
@@ -140,7 +166,8 @@
             const infoDiv = document.getElementById("info");
             const msgDiv = document.createElement('div');
             msgDiv.className = isError ? 'error' : 'info';
-            msgDiv.innerHTML = DOMPurify.sanitize(message);
+            const timestamp = new Date().toISOString().slice(11, 19);
+            msgDiv.innerHTML = DOMPurify.sanitize(`[${timestamp}] ${message}`);
             infoDiv.appendChild(msgDiv);
             while (infoDiv.children.length > MAX_INFO_MESSAGES) {
                 infoDiv.removeChild(infoDiv.firstChild);
@@ -150,11 +177,12 @@
 
         // センサーデータ取得
         async function fetchSensorData() {
+            const deviceId = document.getElementById("deviceSelect").value;
             const maxRetries = 3;
             let attempts = 0;
             while (attempts < maxRetries) {
                 try {
-                    let res = await fetch("/get_data");
+                    let res = await fetch(`/get_data?device_id=${encodeURIComponent(deviceId)}`);
                     if (!res.ok) throw new Error(`データ取得に失敗しました: HTTPステータス ${res.status}`);
                     return await res.json();
                 } catch (e) {
@@ -169,12 +197,129 @@
             }
         }
 
+        // ログデータ取得
+        async function fetchLogs(filename, deviceId) {
+            try {
+                let url = `/get_logs?filename=${encodeURIComponent(filename)}`;
+                if (deviceId) url += `&device_id=${encodeURIComponent(deviceId)}`;
+                let res = await fetch(url);
+                if (!res.ok) throw new Error(`ログ取得に失敗しました: HTTPステータス ${res.status}`);
+                return await res.json();
+            } catch (e) {
+                console.error("Fetch logs error:", e);
+                showMessage(`エラー: ログデータの取得に失敗しました: ${e.message}`, true);
+                return null;
+            }
+        }
+
+        // ログファイル一覧取得
+        async function fetchLogFiles() {
+            try {
+                let res = await fetch("/get_log_files");
+                if (!res.ok) throw new Error(`ログファイル一覧の取得に失敗しました: HTTPステータス ${res.status}`);
+                let data = await res.json();
+                const select = document.getElementById("logFileSelect");
+                select.innerHTML = '<option value="">ログを選択</option>';
+                data.files.forEach(file => {
+                    const option = document.createElement("option");
+                    option.value = file;
+                    option.textContent = file;
+                    select.appendChild(option);
+                });
+            } catch (e) {
+                console.error("Fetch log files error:", e);
+                showMessage(`エラー: ログファイル一覧の取得に失敗しました: ${e.message}`, true);
+            }
+        }
+
+        // ログデータ可視化
+        function visualizeLogs(logs) {
+            // テーブル更新
+            const tbody = document.querySelector("#logTable tbody");
+            tbody.innerHTML = '';
+            logs.logs.forEach(log => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${DOMPurify.sanitize(log.time)}</td>
+                    <td>${DOMPurify.sanitize(log.device_id)}</td>
+                    <td>${log.lat.toFixed(7)}</td>
+                    <td>${log.lon.toFixed(7)}</td>
+                    <td>${log.heading.toFixed(1)}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // グラフ更新
+            if (chart) chart.destroy();
+            const ctx = document.getElementById("logChart").getContext("2d");
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: logs.logs.map(log => log.time.slice(11, 19)),
+                    datasets: [
+                        {
+                            label: '緯度',
+                            data: logs.logs.map(log => log.lat),
+                            borderColor: 'blue',
+                            fill: false
+                        },
+                        {
+                            label: '経度',
+                            data: logs.logs.map(log => log.lon),
+                            borderColor: 'green',
+                            fill: false
+                        },
+                        {
+                            label: '方位角',
+                            data: logs.logs.map(log => log.heading),
+                            borderColor: 'red',
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { title: { display: true, text: '時間' } },
+                        y: { title: { display: true, text: '値' } }
+                    }
+                }
+            });
+
+            // 軌跡表示
+            if (showTrajectory) {
+                updateTrajectory(logs.logs);
+            }
+        }
+
+        // 軌跡更新
+        function updateTrajectory(logs) {
+            trajectoryLayer.clearLayers();
+            const deviceColors = {
+                "device1": "purple",
+                "device2": "blue"
+            };
+            const devices = [...new Set(logs.map(log => log.device_id))];
+            devices.forEach(deviceId => {
+                const coords = logs
+                    .filter(log => log.device_id === deviceId)
+                    .map(log => [log.lat, log.lon]);
+                if (coords.length > 1) {
+                    L.polyline(coords, {
+                        color: deviceColors[deviceId] || "gray",
+                        weight: 3
+                    }).addTo(trajectoryLayer);
+                }
+            });
+        }
+
         // ログ開始
         function startLogging() {
             logActive = true;
             document.getElementById("logStartBtn").disabled = true;
             document.getElementById("logStopBtn").disabled = false;
             document.getElementById("intervalInput").disabled = true;
+            document.getElementById("deviceSelect").disabled = true;
             showMessage("ログを開始しました。");
 
             async function loop() {
@@ -184,13 +329,30 @@
                     intervalId = setTimeout(loop, intervalMs);
                     return;
                 }
+                if (isNaN(data.lat) || isNaN(data.lon) || Math.abs(data.lat) > 90 || Math.abs(data.lon) > 180 ||
+                    isNaN(data.heading) || data.heading < 0 || data.heading >= 360 ||
+                    isNaN(data.hdop) || isNaN(data.vdop) ||
+                    isNaN(data.imu_x) || isNaN(data.imu_y) || isNaN(data.imu_z)) {
+                    showMessage("エラー: 無効なセンサーデータを受信しました。", true);
+                    intervalId = setTimeout(loop, intervalMs);
+                    return;
+                }
                 updateMapDisplay(data);
                 if (logActive) {
+                    if (lastData && JSON.stringify(data) === JSON.stringify(lastData)) {
+                        showMessage("データに変化なし、ログをスキップしました。");
+                        intervalId = setTimeout(loop, intervalMs);
+                        return;
+                    }
+                    lastData = { ...data };
                     data.time = new Date().toISOString();
                     try {
                         let res = await fetch("/log", {
                             method: "POST",
-                            headers: { 'Content-Type': 'application/json' },
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+                            },
                             body: JSON.stringify(data)
                         });
                         let result = await res.json();
@@ -210,13 +372,15 @@
         function stopLogging() {
             logActive = false;
             if (intervalId) {
-                clearTimeout(intervalId); // setTimeoutで管理しているのでclearTimeoutが正しい
+                clearTimeout(intervalId);
                 intervalId = null;
             }
             document.getElementById("logStartBtn").disabled = false;
             document.getElementById("logStopBtn").disabled = true;
             document.getElementById("intervalInput").disabled = false;
+            document.getElementById("deviceSelect").disabled = false;
             showMessage("ログを停止しました。");
+            fetchLogFiles(); // ログファイル一覧を更新
         }
 
         // イベントバインド
@@ -228,6 +392,21 @@
             const data = await fetchSensorData();
             if (data) updateMapDisplay(data);
         };
+        document.getElementById("toggleTrajectoryBtn").onclick = () => {
+            showTrajectory = !showTrajectory;
+            document.getElementById("toggleTrajectoryBtn").textContent = `軌跡表示: ${showTrajectory ? 'ON' : 'OFF'}`;
+            if (!showTrajectory) {
+                trajectoryLayer.clearLayers();
+            } else {
+                const filename = document.getElementById("logFileSelect").value;
+                const deviceId = document.getElementById("deviceSelect").value;
+                if (filename) {
+                    fetchLogs(filename, deviceId).then(logs => {
+                        if (logs && logs.logs) visualizeLogs(logs);
+                    });
+                }
+            }
+        };
         document.getElementById("intervalInput").addEventListener("change", (e) => {
             let newInterval = parseInt(e.target.value) || 1000;
             intervalMs = Math.min(Math.max(newInterval, 100), 60000);
@@ -237,10 +416,29 @@
                 startLogging();
             }
         });
+        document.getElementById("logFileSelect").addEventListener("change", async (e) => {
+            const filename = e.target.value;
+            const deviceId = document.getElementById("deviceSelect").value;
+            if (filename) {
+                const logs = await fetchLogs(filename, deviceId);
+                if (logs && logs.logs) visualizeLogs(logs);
+            }
+        });
+        document.getElementById("deviceSelect").addEventListener("change", async () => {
+            const filename = document.getElementById("logFileSelect").value;
+            const deviceId = document.getElementById("deviceSelect").value;
+            if (filename) {
+                const logs = await fetchLogs(filename, deviceId);
+                if (logs && logs.logs) visualizeLogs(logs);
+            }
+            const data = await fetchSensorData();
+            if (data) updateMapDisplay(data);
+        });
 
         // 起動時初期表示
         window.onload = async () => {
             initMap();
+            await fetchLogFiles();
             const data = await fetchSensorData();
             if (data) {
                 map.setView([data.lat, data.lon], 16);
