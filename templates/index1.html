@@ -34,6 +34,15 @@
         // 定数宣言
         const METERS_PER_DEGREE = 111320;
         const MAX_INFO_MESSAGES = 20;
+        // ベースライン・扇形サイズ算出用定数
+        const BASELINE_BASE = 0.7;
+        const BASELINE_EXP = 1.2;
+        const BASELINE_MAX = 10;
+        const BASELINE_MIN = 0.1;
+        const SECTOR_BASE = 1.0;
+        const SECTOR_EXP = 1.2;
+        const SECTOR_MAX = 15;
+        const SECTOR_MIN = 0.2;
 
         // テンプレート変数
         const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
@@ -56,14 +65,14 @@
                 console.warn(`Invalid zoom level: ${zoom}`);
                 zoom = Math.min(Math.max(zoom, 1), 19);
             }
-            return Math.min(10, Math.max(0.1, 0.7 * Math.pow(1.2, 16 - zoom)));
+            return Math.min(BASELINE_MAX, Math.max(BASELINE_MIN, BASELINE_BASE * Math.pow(BASELINE_EXP, 16 - zoom)));
         }
         function getSectorRadiusByZoom(zoom) {
             if (zoom < 1 || zoom > 19) {
                 console.warn(`Invalid zoom level: ${zoom}`);
                 zoom = Math.min(Math.max(zoom, 1), 19);
             }
-            return Math.min(15, Math.max(0.2, 1.0 * Math.pow(1.2, 16 - zoom)));
+            return Math.min(SECTOR_MAX, Math.max(SECTOR_MIN, SECTOR_BASE * Math.pow(SECTOR_EXP, 16 - zoom)));
         }
 
         // 緯度経度⇔UTM変換
@@ -185,7 +194,7 @@
                             body: JSON.stringify(data)
                         });
                         let result = await res.json();
-                        if (!res.ok) throw new Error(result.error || `ログ記録に失敗しました: HTTPステータス ${res.status}`);
+                        if (!res.ok) throw new Error(result?.error || `ログ記録に失敗しました: HTTPステータス ${res.status}`);
                         showMessage("ログを記録しました。");
                     } catch (e) {
                         console.error("Log error:", e);
@@ -200,8 +209,10 @@
         // ログ停止
         function stopLogging() {
             logActive = false;
-            clearInterval(intervalId);
-            intervalId = null;
+            if (intervalId) {
+                clearTimeout(intervalId); // setTimeoutで管理しているのでclearTimeoutが正しい
+                intervalId = null;
+            }
             document.getElementById("logStartBtn").disabled = false;
             document.getElementById("logStopBtn").disabled = true;
             document.getElementById("intervalInput").disabled = false;
@@ -221,7 +232,7 @@
             let newInterval = parseInt(e.target.value) || 1000;
             intervalMs = Math.min(Math.max(newInterval, 100), 60000);
             if (intervalId) {
-                clearInterval(intervalId);
+                clearTimeout(intervalId);
                 intervalId = null;
                 startLogging();
             }
