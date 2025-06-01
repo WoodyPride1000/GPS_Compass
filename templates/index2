@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>GPS可視化</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        #map { height: 90vh; }
+        .info-box {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            z-index: 1000;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="info-box">
+        <div>
+            <strong>位置情報形式:</strong>
+            <button onclick="setFormat('latlon')">緯度経度</button>
+            <button onclick="setFormat('mgrs')">MGRS</button>
+            <button onclick="setFormat('utm')">UTM</button>
+        </div>
+        <div id="position-display"></div>
+        <div>方位角: <span id="heading"></span>°</div>
+        <div>基線誤差: <span id="error"></span> m</div>
+        <div>IMU使用: <span id="imu"></span></div>
+        <div>HDOP（基準局）: <span id="hdop_base"></span></div>
+        <div>HDOP（移動局）: <span id="hdop_rover"></span></div>
+    </div>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        let map = L.map('map', { zoomControl: false }).setView([35.681236, 139.767125], 18);
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let baseMarker = L.circleMarker([0,0], {radius:6, color:'blue'}).addTo(map);
+        let headingLine = L.polyline([[0,0],[0,0]], {color:'red'}).addTo(map);
+
+        let positionFormat = 'latlon';
+
+        function setFormat(fmt) {
+            positionFormat = fmt;
+            update();
+        }
+
+        function update() {
+            fetch('/api/position')
+            .then(res => res.json())
+            .then(data => {
+                const lat = data.lat, lon = data.lon;
+                const mgrs = data.mgrs, utm = data.utm;
+
+                if (positionFormat === 'latlon') {
+                    document.getElementById("position-display").innerHTML = `緯度: ${lat.toFixed(6)}, 経度: ${lon.toFixed(6)}`;
+                } else if (positionFormat === 'mgrs') {
+                    document.getElementById("position-display").innerHTML = `MGRS: ${mgrs}`;
+                } else if (positionFormat === 'utm') {
+                    document.getElementById("position-display").innerHTML = `UTM: ${utm}`;
+                }
+
+                document.getElementById("heading").textContent = data.heading.toFixed(1);
+                document.getElementById("error").textContent = data.error.toFixed(2);
+                document.getElementById("imu").textContent = data.imu ? "使用中" : "なし";
+                document.getElementById("hdop_base").textContent = data.hdop_base.toFixed(1);
+                document.getElementById("hdop_rover").textContent = data.hdop_rover.toFixed(1);
+
+                baseMarker.setLatLng([lat, lon]);
+                const angleRad = data.heading * Math.PI / 180;
+                const dx = 0.0003 * Math.sin(angleRad);
+                const dy = 0.0003 * Math.cos(angleRad);
+                headingLine.setLatLngs([[lat, lon], [lat + dx, lon + dy]]);
+                map.setView([lat, lon]);
+            });
+        }
+
+        setInterval(update, 1000);
+        update();
+    </script>
+</body>
+</html>
