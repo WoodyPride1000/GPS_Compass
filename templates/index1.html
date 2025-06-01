@@ -22,29 +22,41 @@
     <button id="logStartBtn">ログ開始</button>
     <button id="logStopBtn" disabled>ログ停止</button>
     <button id="toggleCoordBtn">座標系: 緯度経度</button>
+    <label for="intervalInput">更新間隔:</label>
     <input type="number" id="intervalInput" value="1000" min="100" step="100"> ms
     <div id="map"></div>
     <div id="info"></div>
 
     <script>
-        const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
-        let map = L.map('map').setView([0, 0], 16);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-        let overlayGroup = L.layerGroup().addTo(map);
-        let marker = L.marker([0, 0]).addTo(overlayGroup);
-        let baselineLine = null;
-        let sectorCircle = null;
-        let logActive = false;
-        let currentCoordType = "latlon";
-        let intervalMs = 1000;
+    (() => {
+        // 定数宣言
+        const METERS_PER_DEGREE = 111320; // 緯度1度あたりのメートル（近似値）
+        const MAX_INFO_MESSAGES = 20;      // info欄に表示する最大件数
 
+        // テンプレート変数
+        const DUMMY_MODE = {{ 'true' if dummy_mode else 'false' }};
+        // 状態変数
+        let map, overlayGroup, marker, baselineLine, sectorCircle;
+        let logActive = false, currentCoordType = "latlon";
+        let intervalMs = 1000, intervalId = null;
+
+        // 地図初期化
+        function initMap() {
+            map = L.map('map').setView([0, 0], 16);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+            overlayGroup = L.layerGroup().addTo(map);
+            marker = L.marker([0, 0]).addTo(overlayGroup);
+        }
+
+        // ズームレベルに応じた線や扇形サイズ
         function getBaselineLengthByZoom(zoom) {
-            return Math.min(10, Math.max(0.1, 0.7 * Math.pow(1.2, 16 - zoom))); // 上限/下限を設定
+            return Math.min(10, Math.max(0.1, 0.7 * Math.pow(1.2, 16 - zoom)));
         }
         function getSectorRadiusByZoom(zoom) {
-            return Math.min(15, Math.max(0.2, 1.0 * Math.pow(1.2, 16 - zoom))); // 上限/下限を設定
+            return Math.min(15, Math.max(0.2, 1.0 * Math.pow(1.2, 16 - zoom)));
         }
 
+        // 緯度経度⇔UTM変換
         function latlonToUTM(lat, lon, zone) {
             let proj4str = `+proj=utm +zone=${zone} +north +ellps=WGS84 +datum=WGS84 +units=m +no_defs`;
             let utmCoord = proj4('WGS84', proj4str, [lon, lat]);
@@ -56,6 +68,7 @@
             return { lat: latlon[1], lon: latlon[0] };
         }
 
+        // 地図・情報更新
         function updateMapDisplay(data) {
             let lat = data.lat, lon = data.lon;
             if (currentCoordType === "utm") {
@@ -72,15 +85,16 @@
             const zoom = map.getZoom();
             const baselineLength = getBaselineLengthByZoom(zoom);
             const sectorRadius = getSectorRadiusByZoom(zoom);
-            let lat2 = lat + (baselineLength * Math.cos(headingRad)) / 111320;
-            let lon2 = lon + (baselineLength * Math.sin(headingRad)) / (111320 * Math.cos(lat * Math.PI / 180));
+
+            let lat2 = lat + (baselineLength * Math.cos(headingRad)) / METERS_PER_DEGREE;
+            let lon2 = lon + (baselineLength * Math.sin(headingRad)) / (METERS_PER_DEGREE * Math.cos(lat * Math.PI / 180));
             baselineLine = L.polyline([[lat, lon], [lat2, lon2]], { color: 'red' }).addTo(overlayGroup);
 
             let sectorPoints = [];
             for (let angleDeg = data.heading - 10; angleDeg <= data.heading + 10; angleDeg += 2) {
                 let rad = angleDeg * Math.PI / 180;
-                let latp = lat + (sectorRadius * Math.cos(rad)) / 111320;
-                let lonp = lon + (sectorRadius * Math.sin(rad)) / (111320 * Math.cos(lat * Math.PI / 180));
+                let latp = lat + (sectorRadius * Math.cos(rad)) / METERS_PER_DEGREE;
+                let lonp = lon + (sectorRadius * Math.sin(rad)) / (METERS_PER_DEGREE * Math.cos(lat * Math.PI / 180));
                 sectorPoints.push([latp, lonp]);
             }
             sectorCircle = L.polygon([[lat, lon], ...sectorPoints], { color: 'orange', fillOpacity: 0.3 }).addTo(overlayGroup);
@@ -103,15 +117,21 @@
             });
         }
 
+        // info欄にメッセージ追加（最大数制御）
         function showMessage(message, isError = false) {
             const infoDiv = document.getElementById("info");
             const msgDiv = document.createElement('div');
             msgDiv.className = isError ? 'error' : 'info';
             msgDiv.innerHTML = DOMPurify.sanitize(message);
             infoDiv.appendChild(msgDiv);
+            // 最大件数制御
+            while (infoDiv.children.length > MAX_INFO_MESSAGES) {
+                infoDiv.removeChild(infoDiv.firstChild);
+            }
             infoDiv.scrollTop = infoDiv.scrollHeight;
         }
 
+        // センサーデータ取得
         async function fetchSensorData() {
             try {
                 let res = await fetch("/get_data");
@@ -124,12 +144,12 @@
             }
         }
 
-        let intervalId = null;
-
+        // ログ開始
         function startLogging() {
             logActive = true;
             document.getElementById("logStartBtn").disabled = true;
             document.getElementById("logStopBtn").disabled = false;
+            document.getElementById("intervalInput").disabled = true;
             showMessage("ログを開始しました。");
 
             intervalId = setInterval(async () => {
@@ -155,15 +175,18 @@
             }, intervalMs);
         }
 
+        // ログ停止
         function stopLogging() {
             logActive = false;
             clearInterval(intervalId);
             intervalId = null;
             document.getElementById("logStartBtn").disabled = false;
             document.getElementById("logStopBtn").disabled = true;
+            document.getElementById("intervalInput").disabled = false;
             showMessage("ログを停止しました。");
         }
 
+        // イベントバインド
         document.getElementById("logStartBtn").onclick = startLogging;
         document.getElementById("logStopBtn").onclick = stopLogging;
         document.getElementById("toggleCoordBtn").onclick = async () => {
@@ -181,13 +204,16 @@
             }
         });
 
+        // 起動時初期表示
         window.onload = async () => {
+            initMap();
             const data = await fetchSensorData();
             if (data) {
                 map.setView([data.lat, data.lon], 16);
                 updateMapDisplay(data);
             }
         };
+    })();
     </script>
 </body>
 </html>
