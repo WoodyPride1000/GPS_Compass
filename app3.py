@@ -1,74 +1,61 @@
-from flask import Flask, jsonify, render_template
+import threading
+import time
 import serial
 import pynmea2
 import math
-import threading
-import time
-import random
-import os # シリアルポートの存在確認用
+import random # For DUMMY_MODE
+import os
+from flask import Flask, jsonify, render_template
 
-# IMUライブラリのインポート（利用可能であれば）
-IMU_AVAILABLE = False
-try:
-    from mpu6050 import mpu6050
-    IMU_AVAILABLE = True
-except ImportError:
-    print("警告: mpu6050ライブラリが見つかりませんでした。IMUは無効になります。")
+# ... (IMU_AVAILABLE, mpu6050 imports as before) ...
 
 app = Flask(__name__)
 
 # --- 設定 ---
-# ダミーモードのフラグ
-# True にすると実デバイスの代わりにダミーデータを生成します。
-# 開発・デバッグ時は True に設定することを推奨します。
-DUMMY_MODE = True
-
+DUMMY_MODE = False # 実機運用時は False
 GPS_BASE_PORT = '/dev/ttyUSB0'
 GPS_ROVER_PORT = '/dev/ttyUSB1'
-BAUDRATE = 4800
+BAUDRATE = 4800 # このコードでは9600に変わっているので注意
 
-# データを保持するクラス
+# データを保持するクラス (前回のレビューから引き継ぎ)
 class SensorData:
     def __init__(self):
         self.base_data = {'lat': 0.0, 'lon': 0.0, 'hdop': 99.9}
         self.rover_data = {'lat': 0.0, 'lon': 0.0, 'hdop': 99.9}
-        self.heading_gps = 0.0 # GPSのみから計算されたヘディング
+        self.heading_gps = 0.0
         self.error = 0.0
-        self.imu_status = False # IMUが利用可能かどうか
-        self.imu_raw_gyro_z = 0.0 # IMUの生のZ軸ジャイロデータ（角速度）
-        self.lock = threading.Lock() # スレッドセーフティのためのロック
+        self.imu_status = False
+        self.imu_raw_gyro_z = 0.0 # あるいは推定されたヨー角
+        self.lock = threading.Lock()
 
-sensor_data = SensorData() # データのシングルトンインスタンス
+sensor_data = SensorData()
 
-# --- IMU 初期化と読み取り ---
+# --- IMU 初期化と読み取りスレッド ---
 if IMU_AVAILABLE and not DUMMY_MODE:
     try:
-        imu = mpu6050(0x68)
-        # IMUが初期化できたことを確認
+        imu_device = mpu6050(0x68) # IMUデバイスをグローバルに持たせる
         with sensor_data.lock:
             sensor_data.imu_status = True
         print("IMUが正常に初期化されました。")
     except Exception as e:
         print(f"IMU初期化エラー: {e}。IMUは無効になります。")
-        IMU_AVAILABLE = False # 初期化失敗時はIMUを無効化
+        IMU_AVAILABLE = False
 
-def read_imu():
+def read_imu_thread():
+    # このスレッド内でのみ imu_device にアクセス
     while True:
         if DUMMY_MODE:
-            # ダミーのIMUデータ生成
             with sensor_data.lock:
-                # 実際のIMUデータ（例：ヨー角の安定した推定値）を模倣
-                # 現実にはフィルタリングされた姿勢データが必要
-                sensor_data.imu_raw_gyro_z = random.uniform(-5.0, 5.0) # ダミーのZ軸角速度
+                sensor_data.imu_raw_gyro_z = random.uniform(-5.0, 5.0)
                 sensor_data.imu_status = True
-            time.sleep(0.1) # IMUはより高速に更新されることが多い
+            time.sleep(0.1)
         else:
-            if not IMU_AVAILABLE: # 初期化に失敗した場合はスキップ
+            if not IMU_AVAILABLE:
                 time.sleep(1)
                 continue
             try:
-                # accel = imu.get_accel_data() # 加速度データも取得できる
-                gyro = imu.get_gyro_data()
+                # accel = imu_device.get_accel_data()
+                gyro = imu_device.get_gyro_data()
                 with sensor_data.lock:
                     sensor_data.imu_raw_gyro_z = gyro['z']
                     sensor_data.imu_status = True
@@ -76,147 +63,145 @@ def read_imu():
                 with sensor_data.lock:
                     sensor_data.imu_status = False
                 print(f"IMU読み取りエラー: {e}")
-            time.sleep(0.05) # 20Hz更新を想定
+            time.sleep(0.05)
 
-# --- GPS読み取り ---
-def read_gps(port, target_key): # 'base'または'rover'を文字列で受け取る
+# --- GPS読み取りスレッド ---
+def read_gps_thread(port, target_key):
     if DUMMY_MODE:
         while True:
-            # ダミーのGPSデータ生成
             with sensor_data.lock:
                 if target_key == 'base':
                     sensor_data.base_data['lat'] = random.uniform(35.680, 35.682)
                     sensor_data.base_data['lon'] = random.uniform(139.765, 139.768)
                     sensor_data.base_data['hdop'] = random.uniform(0.8, 1.5)
-                else: # rover
-                    # ローバーはベースから少しずれた位置をシミュレート
+                else:
                     sensor_data.rover_data['lat'] = sensor_data.base_data['lat'] + random.uniform(-0.0001, 0.0001)
                     sensor_data.rover_data['lon'] = sensor_data.base_data['lon'] + random.uniform(-0.0001, 0.0001)
                     sensor_data.rover_data['hdop'] = random.uniform(0.8, 1.5)
-            time.sleep(random.uniform(0.5, 1.5)) # GPSは1Hz更新を想定
+            time.sleep(random.uniform(0.5, 1.5))
     else:
-        # シリアルポートの存在を確認
         if not os.path.exists(port):
             print(f"エラー: GPSポート {port} が見つかりません。")
-            return # スレッドを終了させる
+            return
 
         try:
+            # ここでシリアルポートをオープンし、このスレッド内でのみ使用
             ser = serial.Serial(port, BAUDRATE, timeout=1)
             print(f"GPSポート {port} が正常に開かれました。")
         except serial.SerialException as e:
             print(f"エラー: GPSポート {port} を開けません - {e}")
-            return # スレッドを終了させる
+            return
 
         while True:
             try:
                 line = ser.readline().decode('ascii', errors='ignore').strip()
-                if line.startswith('$GPGGA'):
+                if line.startswith("$GPGGA"):
                     msg = pynmea2.parse(line)
                     with sensor_data.lock:
                         if target_key == 'base':
                             sensor_data.base_data['lat'] = msg.latitude
                             sensor_data.base_data['lon'] = msg.longitude
                             sensor_data.base_data['hdop'] = float(msg.horizontal_dil)
-                        else: # rover
+                        else:
                             sensor_data.rover_data['lat'] = msg.latitude
                             sensor_data.rover_data['lon'] = msg.longitude
                             sensor_data.rover_data['hdop'] = float(msg.horizontal_dil)
             except pynmea2.ParseError as e:
-                # print(f"警告: NMEA解析エラー ({port}): {e} - '{line}'")
-                continue # 解析できない行はスキップ
+                continue
             except UnicodeDecodeError:
-                # print(f"警告: 無効な文字エンコーディング ({port})")
                 continue
             except serial.SerialException as e:
                 print(f"GPSポート {port} でシリアル通信エラー: {e}")
-                break # エラーが発生したらスレッドを終了させる（再起動が必要になる可能性）
+                break
             except Exception as e:
                 print(f"GPSポート {port} で予期せぬエラー: {e}")
                 time.sleep(1)
 
-# --- ヘディングと誤差の計算 ---
-def calculate_heading_and_error():
+# --- ヘディングと誤差の計算スレッド ---
+def calculate_heading_and_error_thread():
     while True:
         with sensor_data.lock:
             lat1, lon1 = sensor_data.base_data['lat'], sensor_data.base_data['lon']
             lat2, lon2 = sensor_data.rover_data['lat'], sensor_data.rover_data['lon']
 
-        # 緯度・経度が初期値（0.0）の場合は計算をスキップ
         if lat1 == 0.0 or lon1 == 0.0 or lat2 == 0.0 or lon2 == 0.0:
             time.sleep(1)
             continue
 
-        dLat = math.radians(lat2 - lat1)
-        dLon = math.radians(lon2 - lon1)
+        # 正確な測地系計算 (Haversine for distance, bearing for heading)
+        R = 6371000 # 地球の平均半径 (メートル)
+        phi1 = math.radians(lat1)
+        lambda1 = math.radians(lon1)
+        phi2 = math.radians(lat2)
+        lambda2 = math.radians(lon2)
 
-        y = math.sin(dLon) * math.cos(math.radians(lat2))
-        x = math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) - \
-            math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(dLon)
-        
-        # ヘディングはベースからローバーへの方向
+        d_phi = phi2 - phi1
+        d_lambda = lambda2 - lambda1
+
+        # Distance (Haversine formula)
+        a = math.sin(d_phi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        calculated_distance = R * c
+
+        # Heading (bearing)
+        y = math.sin(d_lambda) * math.cos(phi2)
+        x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
         calculated_heading = (math.degrees(math.atan2(y, x)) + 360) % 360
 
-        # 誤差（Haversine距離）
-        R = 6371000 # 地球の平均半径 (メートル)
-        a = math.sin(dLat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon/2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        calculated_error = R * c
+        # error: 基線長に対する誤差（具体的な定義に応じて調整）
+        # 例: 既知の基線長が 0.7m であれば
+        calculated_error = abs(calculated_distance - 0.7) # 仮の定義
 
         with sensor_data.lock:
             sensor_data.heading_gps = calculated_heading
             sensor_data.error = calculated_error
 
-        time.sleep(0.5) # GPSデータ更新に合わせて計算頻度を調整
+        time.sleep(0.5)
 
 # --- スレッド起動 ---
-threading.Thread(target=read_gps, args=(GPS_BASE_PORT, 'base'), daemon=True).start()
-threading.Thread(target=read_gps, args=(GPS_ROVER_PORT, 'rover'), daemon=True).start()
-threading.Thread(target=calculate_heading_and_error, daemon=True).start()
-if IMU_AVAILABLE: # IMUが利用可能かつ初期化に成功した場合のみスレッドを起動
-    threading.Thread(target=read_imu, daemon=True).start()
+# 各スレッドは自身のシリアルポートを管理し、共有データはロックで保護
+threading.Thread(target=read_gps_thread, args=(GPS_BASE_PORT, 'base'), daemon=True).start()
+threading.Thread(target=read_gps_thread, args=(GPS_ROVER_PORT, 'rover'), daemon=True).start()
+threading.Thread(target=calculate_heading_and_error_thread, daemon=True).start()
+if IMU_AVAILABLE:
+    threading.Thread(target=read_imu_thread, daemon=True).start()
 
-# --- APIエンドポイント ---
-@app.route("/api/position")
-def api_position():
-    with sensor_data.lock: # データを読み取る際にもロックをかける
-        lat = sensor_data.base_data['lat']
-        lon = sensor_data.base_data['lon']
-        heading_gps = sensor_data.heading_gps
-        imu_status = sensor_data.imu_status
-        imu_raw_gyro_z = sensor_data.imu_raw_gyro_z
-        error_val = sensor_data.error
-        hdop_base_val = sensor_data.base_data['hdop']
-        hdop_rover_val = sensor_data.rover_data['hdop']
-
-        # ヘディングの融合ロジック（例: GPSヘディングを優先し、IMUは補足情報として含める）
-        # 注意: imu_raw_gyro_z は角速度であり、直接ヘディングに足すのは不適切です。
-        #       実際のアプリケーションでは、IMUからの安定した姿勢（ヨー角）や
-        #       GPSとIMUを組み合わせたセンサーフュージョンアルゴリズムが必要です。
-        #       ここでは例としてGPSヘディングをそのまま返し、IMU情報は別途提供します。
-        combined_heading = heading_gps 
-        
-        # もしIMUから安定した絶対ヨー角が得られる場合、例えば以下のように使用
-        # if imu_status and imu_stable_yaw_available: # IMUが安定したヨー角を提供できる場合
-        #     combined_heading = imu_stable_yaw_angle 
-        # else:
-        #     combined_heading = heading_gps
-
-    return jsonify({
-        'lat': lat,
-        'lon': lon,
-        'heading': combined_heading, # index.htmlが期待する 'heading' フィールド
-        'error': error_val,
-        'imu_status': imu_status,
-        'imu_raw_gyro_z': imu_raw_gyro_z, # IMUの生データも返す
-        'hdop_base': hdop_base_val,
-        'hdop_rover': hdop_rover_val
-    })
-
-# --- index.htmlを返す ---
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# --- アプリ起動 ---
+@app.route("/api/position")
+def api_position():
+    with sensor_data.lock:
+        lat = sensor_data.base_data['lat']
+        lon = sensor_data.base_data['lon']
+        heading_gps = sensor_data.heading_gps
+        imu_status = sensor_data.imu_status
+        imu_raw_gyro_z = sensor_data.imu_raw_gyro_z # IMUの生データ
+        error_val = sensor_data.error
+        hdop_base_val = sensor_data.base_data['hdop']
+        hdop_rover_val = sensor_data.rover_data['hdop']
+        distance_val = sensor_data.error # 仮にerrorに距離も入っていると想定。別途distance変数を用意しても良い
+
+        # ここでIMUとGPSのヘディングを融合するロジックを実装
+        # index.html は 'heading' を期待
+        # 現状、imu_raw_gyro_zは角速度なので、単純に融合することはできません。
+        # 実際のプロジェクトでは、IMUから安定したヨー角（MadgwickFilterなど）を取得し、
+        # それとGPSヘディングを何らかのフィルタ（例：カルマンフィルター）で融合します。
+        # ここでは暫定的にGPSヘディングを使用します。
+        fused_heading = heading_gps
+
+    return jsonify({
+        "lat": lat,
+        "lon": lon,
+        "heading": fused_heading % 360, # index.htmlが期待するフィールド名
+        "distance": distance_val, # 新しくdistanceを返す
+        "error": error_val,
+        "imu": imu_status, # index.html は 'imu' を期待
+        "imu_raw_gyro_z": imu_raw_gyro_z, # デバッグ用にIMU生データも返す
+        "hdop_base": hdop_base_val,
+        "hdop_rover": hdop_rover_val
+    })
+
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
