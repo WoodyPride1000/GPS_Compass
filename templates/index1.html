@@ -1,354 +1,238 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
     <meta charset="utf-8">
     <title>GPS可視化</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-    <style>
-        html, body {
-            height: 100%; /* HTMLとBodyがビューポートの全高を使用するように */
-            margin: 0;
-            padding: 0;
-            overflow: hidden; /* スクロールバーを非表示 */
-            font-family: Arial, sans-serif; /* フォントを指定 */
-        }
-        #map {
-            height: 100vh; /* ビューポートの高さ全体を使用 */
-            width: 100vw; /* ビューポートの幅全体を使用 */
-        }
-        .info-box {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(255,255,255,0.9);
-            padding: 10px;
-            z-index: 1000;
-            font-size: 14px;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            color: #333; /* 文字色を濃く */
-        }
-        .info-box div {
-            margin-bottom: 3px;
-        }
-        #slider-box {
-            position: absolute;
-            bottom: 10px;
-            left: 10px;
-            background: rgba(255,255,255,0.9);
-            padding: 10px;
-            z-index: 1000;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-        }
-        #status-message {
-            color: red;
-            font-weight: bold;
-            margin-top: 5px; /* エラーメッセージと他の情報の間隔を調整 */
-        }
-        .control-box { /* 新しいコントロールボックスのスタイル */
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(255,255,255,0.9);
-            padding: 10px;
-            z-index: 1000;
-            font-size: 14px;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            color: #333;
-        }
-        .control-box label {
-            display: flex;
-            align-items: center;
-            cursor: pointer;
-        }
-        .control-box input[type="checkbox"] {
-            margin-right: 5px;
-        }
-    </style>
+    <link rel="stylesheet" href="/static/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-    <div class="info-box">
+    <div class="info-box overlay-box">
         <div>緯度: <span id="lat">--</span></div>
         <div>経度: <span id="lon">--</span></div>
         <div>方位角: <span id="heading">--</span>°</div>
         <div>基線長: <span id="distance">--</span> m</div>
         <div>基線誤差: <span id="error">--</span> m</div>
         <div>IMU使用: <span id="imu">--</span></div>
-        <div>IMU Z軸角速度: <span id="imu_raw_gyro_z">--</span> °/s</div> <div>HDOP（基準局）: <span id="hdop_base">--</span></div>
+        <div>IMU Z軸角速度: <span id="imu_raw_gyro_z">--</span> °/s</div>
+        <div>HDOP（基準局）: <span id="hdop_base">--</span></div>
         <div>HDOP（移動局）: <span id="hdop_rover">--</span></div>
         <div id="status-message"></div>
     </div>
 
-    <div class="control-box">
+    <div class="control-box overlay-box">
         <label>
-            <input type="checkbox" id="followMapCheckbox" checked>
+            <input type="checkbox" id="followMapCheckbox" checked aria-label="地図追従を有効にする">
             地図追従
         </label>
     </div>
 
-    <div id="slider-box">
+    <div class="slider-box overlay-box">
         <label for="fanSlider">角度幅: <span id="fanValue">45</span>°</label><br>
-        <input type="range" id="fanSlider" min="0" max="90" value="45">
+        <input type="range" id="fanSlider" min="0" max="90" value="45" aria-label="扇形の角度を調整">
     </div>
 
     <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="/static/leaflet/leaflet.js"></script>
     <script>
-        // 東京駅を初期中心に設定。データ受信後に自動で移動。
-        let map = L.map('map', { zoomControl: false, center: [35.681236, 139.767125], zoom: 18 });
-        L.control.zoom({ position: 'bottomright' }).addTo(map);
+        const state = {
+            map: L.map('map', { zoomControl: false, center: [35.681236, 139.767125], zoom: 18 }),
+            baseMarker: L.circleMarker([0, 0], { radius: 6, color: 'blue' }),
+            headingLine: L.polyline([[0, 0], [0, 0]], { color: 'red', weight: 2 }),
+            fanShape: L.polygon([[0, 0]], { color: 'green', fillColor: 'green', fillOpacity: 0.3, weight: 1 }),
+            fanAngle: 45,
+            lastKnownHeading: 0.0,
+            lastLat: 0.0,
+            lastLon: 0.0,
+            lastImuGyroZ: 0.0,
+            lastUpdateTime: Date.now(),
+            initialViewSet: false,
+            isFollowingMap: true,
+            errorCount: 0
+        };
+
+        state.baseMarker.addTo(state.map);
+        state.headingLine.addTo(state.map);
+        state.fanShape.addTo(state.map);
+        L.control.zoom({ position: 'bottomright' }).addTo(state.map);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
+            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(state.map);
 
-        // マーカーとシェイプをグローバル変数として初期化
-        let baseMarker = L.circleMarker([0, 0], { radius: 6, color: 'blue' }).addTo(map);
-        let headingLine = L.polyline([[0, 0], [0, 0]], { color: 'red', weight: 2 }).addTo(map);
-        let fanShape = L.polygon([[0, 0]], {
-            color: 'green',
-            fillColor: 'green',
-            fillOpacity: 0.3,
-            weight: 1
-        }).addTo(map);
-        let fanAngle = 45;
-        let initialViewSet = false; // 初期ビューがGPSデータに基づいて設定されたかを示すフラグ
+        const HEADING_LINE_SCREEN_RATIO = 0.40;
+        const FAN_SHAPE_SCREEN_RATIO = 0.30;
+        const API_FETCH_INTERVAL = 500;
+        const MAX_ERROR_COUNT = 3;
+        const HDOP_THRESHOLD = 2.0;
 
-        // --- 新しい状態変数 ---
-        let isFollowingMap = true; // 地図追従フラグ
-        let lastKnownHeading = 0.0; // 最後に有効なGPSから得られたヘディング
-        let lastImuGyroZ = 0.0; // 最後のIMU Z軸角速度
-        let lastUpdateTime = Date.now(); // 最終更新タイムスタンプ
-
-        // 画面の縦サイズに対する割合 (0.0 - 1.0)
-        const HEADING_LINE_SCREEN_RATIO = 0.40; // 方位角線 40%
-        const FAN_SHAPE_SCREEN_RATIO = 0.30;   // 扇形 30%
-        const API_FETCH_INTERVAL = 2000; // APIフェッチ間隔（ms）
-
-        // --- UI要素イベントリスナー ---
-        // スライダーの値が変更されたときに扇形の角度を更新
+        // スライダーイベント
         document.getElementById("fanSlider").addEventListener("input", () => {
-            fanAngle = parseInt(document.getElementById("fanSlider").value);
-            document.getElementById("fanValue").textContent = fanAngle;
-            updateGeometrySizes(); // 角度が変わったので再描画トリガー
+            state.fanAngle = parseInt(document.getElementById("fanSlider").value);
+            document.getElementById("fanValue").textContent = state.fanAngle;
+            updateGeometrySizes();
         });
 
-        // 地図追従チェックボックスの変更イベント
+        // 地図追従イベント
         document.getElementById("followMapCheckbox").addEventListener('change', function() {
-            isFollowingMap = this.checked;
-            // 追従を再開する場合、現在の位置に地図を移動
-            if (isFollowingMap && baseMarker.getLatLng().lat !== 0.0) {
-                map.setView(baseMarker.getLatLng(), map.getZoom());
+            state.isFollowingMap = this.checked;
+            if (state.isFollowingMap && state.baseMarker.getLatLng().lat !== 0.0) {
+                state.map.setView(state.baseMarker.getLatLng(), state.map.getZoom());
             }
         });
 
-        // --- 地図操作イベントリスナー ---
-        // ユーザーが地図を移動し始めたら追従をオフにする
-        map.on('movestart', function() {
-            if (isFollowingMap) { // 現在追従中の場合のみ
+        // 地図操作イベント
+        state.map.on('movestart', () => {
+            if (state.isFollowingMap) {
                 document.getElementById("followMapCheckbox").checked = false;
-                isFollowingMap = false;
+                state.isFollowingMap = false;
             }
         });
-        // ユーザーがズームを開始したら追従をオフにする
-        map.on('zoomstart', function() {
-            if (isFollowingMap) { // 現在追従中の場合のみ
+        state.map.on('zoomstart', () => {
+            if (state.isFollowingMap) {
                 document.getElementById("followMapCheckbox").checked = false;
-                isFollowingMap = false;
+                state.isFollowingMap = false;
             }
         });
 
+        // ウィンドウリサイズイベント
+        window.addEventListener('resize', updateGeometrySizes);
 
-        // 特定のピクセル距離が何メートルに相当するかを計算する関数
         function calculateDistanceForPixels(targetPixels) {
-            // 現在のマップの中心のレイヤーポイント（ピクセル座標）
-            const centerPoint = map.latLngToLayerPoint(map.getCenter());
-            // 中心からY軸方向（上方向）にtargetPixelsだけ移動したレイヤーポイント
+            const centerPoint = state.map.latLngToLayerPoint(state.map.getCenter());
             const targetPoint = L.point(centerPoint.x, centerPoint.y - targetPixels);
-            // そのレイヤーポイントを地理座標（LatLng）に変換
-            const targetLatLng = map.layerPointToLatLng(targetPoint);
-            // 中心とターゲットLatLngの間の距離を計算（メートル）
-            return map.distance(map.getCenter(), targetLatLng);
+            const targetLatLng = state.map.layerPointToLatLng(targetPoint);
+            return state.map.distance(state.map.getCenter(), targetLatLng);
         }
 
-        // ズーム変更時、またはウィンドウサイズ変更時にジオメトリのサイズを更新する関数
         function updateGeometrySizes() {
-            const mapContainerHeight = map.getSize().y; // マップコンテナの現在の高さ（ピクセル）
-
-            // 目標とする画面上のピクセル数
+            const mapContainerHeight = state.map.getSize().y;
             const targetHeadingLinePixels = mapContainerHeight * HEADING_LINE_SCREEN_RATIO;
             const targetFanShapePixels = mapContainerHeight * FAN_SHAPE_SCREEN_RATIO;
-
-            // 目標とする地理的な距離（メートル）
             window.headingLineLength = calculateDistanceForPixels(targetHeadingLinePixels);
             window.fanShapeRadius = calculateDistanceForPixels(targetFanShapePixels);
-            
-            // 距離が更新されたので、地図を再描画（APIフェッチは定期実行に任せる）
             redrawMapElements();
         }
 
-        // --- 地図要素の再描画関数 ---
-        // APIデータ受信とは独立して、地図上の線や扇形を更新する
         function redrawMapElements() {
-            const lat = baseMarker.getLatLng().lat;
-            const lon = baseMarker.getLatLng().lng;
-            const currentHeading = lastKnownHeading; // 融合されたヘディングを使用
+            const lat = state.baseMarker.getLatLng().lat;
+            const lon = state.baseMarker.getLatLng().lng;
+            const currentHeading = state.lastKnownHeading;
 
-            if (lat === 0.0 && lon === 0.0) { // マーカーが初期値の場合、描画しない
-                headingLine.setLatLngs([[0, 0], [0, 0]]);
-                fanShape.setLatLngs([[0, 0]]);
+            if (lat === state.lastLat && lon === state.lastLon && currentHeading === state.lastKnownHeading) return;
+            state.lastLat = lat;
+            state.lastLon = lon;
+            state.lastHeading = currentHeading;
+
+            if (lat === 0.0 && lon === 0.0) {
+                state.headingLine.setLatLngs([[0, 0], [0, 0]]);
+                state.fanShape.setLatLngs([[0, 0]]);
                 return;
             }
 
-            const currentHeadingLineLength = window.headingLineLength;
-            const currentFanShapeRadius = window.fanShapeRadius;
-
-            const safeHeadingLineLength = isNaN(currentHeadingLineLength) || currentHeadingLineLength === 0 ? 400 : currentHeadingLineLength;
-            const safeFanShapeRadius = isNaN(currentFanShapeRadius) || currentFanShapeRadius === 0 ? 300 : currentFanShapeRadius;
-
-            const R = 6378137; // 地球の半径 (メートル)
+            const safeHeadingLineLength = isNaN(window.headingLineLength) || window.headingLineLength === 0 ? 400 : window.headingLineLength;
+            const safeFanShapeRadius = isNaN(window.fanShapeRadius) || window.fanShapeRadius === 0 ? 300 : window.fanShapeRadius;
+            const R = 6378137;
             const bearingRad = currentHeading * Math.PI / 180;
-
             const lat1 = lat * Math.PI / 180;
             const lon1 = lon * Math.PI / 180;
 
-            // --- 方位線（可変長）の描画 ---
+            // 方位線
             const lineLat2 = Math.asin(Math.sin(lat1) * Math.cos(safeHeadingLineLength / R) +
                 Math.cos(lat1) * Math.sin(safeHeadingLineLength / R) * Math.cos(bearingRad));
             const lineLon2 = lon1 + Math.atan2(Math.sin(bearingRad) * Math.sin(safeHeadingLineLength / R) * Math.cos(lat1),
                 Math.cos(safeHeadingLineLength / R) - Math.sin(lat1) * Math.sin(lineLat2));
+            state.headingLine.setLatLngs([[lat, lon], [lineLat2 * 180 / Math.PI, lineLon2 * 180 / Math.PI]]);
 
-            const endLat = lineLat2 * 180 / Math.PI;
-            const endLon = lineLon2 * 180 / Math.PI;
-
-            headingLine.setLatLngs([[lat, lon], [endLat, endLon]]); // 既存の線を更新
-
-            // --- 扇形マスク（可変半径）の描画 ---
-            const angleStart = currentHeading - fanAngle / 2;
-            const angleEnd = currentHeading + fanAngle / 2;
-            const segments = 30; // 扇形を構成するセグメント数
-            const latlngs = [[lat, lon]]; // 中心点から開始
-
+            // 扇形
+            const angleStart = currentHeading - state.fanAngle / 2;
+            const angleEnd = currentHeading + state.fanAngle / 2;
+            const segments = Math.max(10, Math.min(30, Math.floor(state.map.getZoom())));
+            const latlngs = [[lat, lon]];
             for (let i = 0; i <= segments; i++) {
                 const angle = angleStart + (angleEnd - angleStart) * i / segments;
                 const angleRad = angle * Math.PI / 180;
-
                 const fanLat2 = Math.asin(Math.sin(lat1) * Math.cos(safeFanShapeRadius / R) +
                     Math.cos(lat1) * Math.sin(safeFanShapeRadius / R) * Math.cos(angleRad));
                 const fanLon2 = lon1 + Math.atan2(Math.sin(angleRad) * Math.sin(safeFanShapeRadius / R) * Math.cos(lat1),
                     Math.cos(safeFanShapeRadius / R) - Math.sin(lat1) * Math.sin(fanLat2));
-
                 latlngs.push([fanLat2 * 180 / Math.PI, fanLon2 * 180 / Math.PI]);
             }
-            latlngs.push([lat, lon]); // 扇形を閉じるため、再度中心点を追加
-
-            fanShape.setLatLngs(latlngs); // 既存の扇形を更新
+            latlngs.push([lat, lon]);
+            state.fanShape.setLatLngs(latlngs);
         }
 
-
-        // --- メイン更新関数 ---
         function update() {
             const statusMessageElement = document.getElementById("status-message");
-            statusMessageElement.textContent = ""; // メッセージをクリア
-
+            statusMessageElement.textContent = "";
             const currentTime = Date.now();
-            const deltaTime = (currentTime - lastUpdateTime) / 1000; // 前回の更新からの時間（秒）
-            lastUpdateTime = currentTime;
+            const deltaTime = (currentTime - state.lastUpdateTime) / 1000;
+            state.lastUpdateTime = currentTime;
 
             fetch('/api/position')
-            .then(res => {
-                if (!res.ok) {
-                    throw new Error(`HTTPエラー! ステータス: ${res.status}`);
-                }
-                return res.json();
-            })
-            .then(data => {
-                const lat = data.lat;
-                const lon = data.lon;
-                const gpsHeading = data.heading; // GPSから得られたヘディング
-                const imuRawGyroZ = data.imu_raw_gyro_z; // IMUの生データ
-                const imuStatus = data.imu; // IMUが利用可能か
-                const error = data.error;
-                const distance = data.distance;
-                const hdop_base = data.hdop_base;
-                const hdop_rover = data.hdop_rover;
+                .then(res => {
+                    if (!res.ok) throw new Error(`HTTPエラー! ステータス: ${res.status}`);
+                    state.errorCount = 0;
+                    return res.json();
+                })
+                .then(data => {
+                    const lat = data.lat;
+                    const lon = data.lon;
+                    const fusedHeading = data.heading; // サーバー側で融合済み
+                    const imuRawGyroZ = data.imu_raw_gyro_z;
+                    const imuStatus = data.imu;
+                    const error = data.error;
+                    const distance = data.distance;
+                    const hdop_base = data.hdop_base;
+                    const hdop_rover = data.hdop_rover;
 
-                // UIの更新
-                document.getElementById("lat").textContent = lat.toFixed(6);
-                document.getElementById("lon").textContent = lon.toFixed(6);
-                document.getElementById("distance").textContent = distance.toFixed(2);
-                document.getElementById("error").textContent = error.toFixed(2);
-                document.getElementById("imu").textContent = imuStatus ? "使用中" : "なし";
-                document.getElementById("imu_raw_gyro_z").textContent = imuRawGyroZ.toFixed(2); // IMU生データ表示
-                document.getElementById("hdop_base").textContent = hdop_base.toFixed(1);
-                document.getElementById("hdop_rover").textContent = hdop_rover.toFixed(1);
+                    // UI更新
+                    document.getElementById("lat").textContent = lat.toFixed(6);
+                    document.getElementById("lon").textContent = lon.toFixed(6);
+                    document.getElementById("heading").textContent = fusedHeading.toFixed(1);
+                    document.getElementById("distance").textContent = distance.toFixed(2);
+                    document.getElementById("error").textContent = error.toFixed(2);
+                    document.getElementById("imu").textContent = imuStatus ? "使用中" : "なし";
+                    document.getElementById("imu_raw_gyro_z").textContent = imuRawGyroZ.toFixed(2);
+                    document.getElementById("hdop_base").textContent = hdop_base.toFixed(1);
+                    document.getElementById("hdop_rover").textContent = hdop_rover.toFixed(1);
+                    document.getElementById("hdop_base").style.color = hdop_base > HDOP_THRESHOLD ? 'red' : 'black';
+                    document.getElementById("hdop_rover").style.color = hdop_rover > HDOP_THRESHOLD ? 'red' : 'black';
 
-                // ベースマーカーの位置を更新
-                baseMarker.setLatLng([lat, lon]);
+                    state.baseMarker.setLatLng([lat, lon]);
+                    state.lastKnownHeading = fusedHeading;
 
-                // --- IMU-GPS簡易融合ロジック ---
-                let fusedHeading = gpsHeading; // デフォルトはGPSヘディング
-                if (imuStatus && Math.abs(imuRawGyroZ) > 0.05 && lat !== 0.0 && lon !== 0.0) { // IMUが利用可能かつ動きがある場合
-                    // 非常に簡易的な融合：GPSヘディングをベースに、IMUの角速度で短時間補間
-                    // GPSの更新間隔（API_FETCH_INTERVAL）内でIMUの角速度を考慮
-                    // 注意：これはドリフトを考慮しないため、長時間だとずれます。
-                    const headingChange = imuRawGyroZ * (API_FETCH_INTERVAL / 1000); // 角度変化 = 角速度 * 時間
-                    fusedHeading = (lastKnownHeading + headingChange + 360) % 360; // 0-360度に正規化
-                    
-                    // ここで、GPSヘディングに大きく乖離しすぎないようにする簡易的な補正
-                    // 例えば、GPSヘディングと融合ヘディングの差が大きい場合は、GPSヘディングに近づける
-                    const diff = (fusedHeading - gpsHeading + 540) % 360 - 180; // -180から180の差
-                    const alpha = 0.1; // 補正の強さ (小さいほどIMUの影響が強い)
-                    fusedHeading = (fusedHeading - alpha * diff + 360) % 360;
+                    if (!state.initialViewSet && (lat !== 0.0 || lon !== 0.0)) {
+                        state.map.setView([lat, lon], 18);
+                        state.initialViewSet = true;
+                    } else if (state.isFollowingMap && (lat !== 0.0 || lon !== 0.0)) {
+                        state.map.setView([lat, lon]);
+                    }
 
-                } else {
-                    fusedHeading = gpsHeading; // IMUが無効な場合や動きがない場合はGPSヘディングをそのまま使う
-                }
-                lastKnownHeading = fusedHeading; // 次回のために保存
-
-                document.getElementById("heading").textContent = fusedHeading.toFixed(1); // 融合されたヘディングを表示
-
-
-                // --- 地図追従ロジック ---
-                if (!initialViewSet && (lat !== 0.0 || lon !== 0.0)) {
-                    // 初回のみGPSデータに基づいて地図の中心とズームを設定
-                    map.setView([lat, lon], 18);
-                    initialViewSet = true;
-                } else if (isFollowingMap && (lat !== 0.0 || lon !== 0.0)) {
-                    // 追従モードの場合のみ、現在位置に地図の中心を追従させる
-                    map.setView([lat, lon]);
-                }
-                
-                // 地図要素を更新（マーカー位置は既に更新済みなので、線と扇形のみ）
-                redrawMapElements();
-            })
-            .catch(error => {
-                console.error('データの取得に失敗しました:', error);
-                statusMessageElement.textContent = `エラー: ${error.message}`;
-                // UI上のデータ表示をクリア
-                document.getElementById("lat").textContent = "--";
-                document.getElementById("lon").textContent = "--";
-                document.getElementById("heading").textContent = "--";
-                document.getElementById("distance").textContent = "--";
-                document.getElementById("error").textContent = "--";
-                document.getElementById("imu").textContent = "--";
-                document.getElementById("imu_raw_gyro_z").textContent = "--";
-                document.getElementById("hdop_base").textContent = "--";
-                document.getElementById("hdop_rover").textContent = "--";
-                
-                // マーカーやシェイプを非表示にする（位置を無効な値に設定）
-                baseMarker.setLatLng([0, 0]);
-                headingLine.setLatLngs([[0, 0], [0, 0]]);
-                fanShape.setLatLngs([[0, 0]]);
-            });
+                    redrawMapElements();
+                })
+                .catch(error => {
+                    state.errorCount++;
+                    if (state.errorCount >= MAX_ERROR_COUNT) {
+                        statusMessageElement.textContent = `エラー: ${error.message}`;
+                        document.getElementById("lat").textContent = "--";
+                        document.getElementById("lon").textContent = "--";
+                        document.getElementById("heading").textContent = "--";
+                        document.getElementById("distance").textContent = "--";
+                        document.getElementById("error").textContent = "--";
+                        document.getElementById("imu").textContent = "--";
+                        document.getElementById("imu_raw_gyro_z").textContent = "--";
+                        document.getElementById("hdop_base").textContent = "--";
+                        document.getElementById("hdop_rover").textContent = "--";
+                        state.baseMarker.setLatLng([0, 0]);
+                        state.headingLine.setLatLngs([[0, 0], [0, 0]]);
+                        state.fanShape.setLatLngs([[0, 0]]);
+                    }
+                });
         }
 
-        // 初期ロード時と定期的にデータを更新
-        // updateGeometrySizesを呼び出すことで、初期の線と扇形も正しく計算される
-        updateGeometrySizes(); // 初回実行で線の長さを計算・地図を更新
+        updateGeometrySizes();
         setInterval(update, API_FETCH_INTERVAL);
     </script>
 </body>
