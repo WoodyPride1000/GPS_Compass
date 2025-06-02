@@ -9,8 +9,9 @@
 </head>
 <body>
     <div class="info-box overlay-box">
-        <div>緯度: <span id="lat">--</span></div>
-        <div>経度: <span id="lon">--</span></div>
+        <div>座標系: <span id="coord_system">緯度経度</span></div>
+        <div>X: <span id="x_coord">--</span></div>
+        <div>Y: <span id="y_coord">--</span></div>
         <div>方位角: <span id="heading">--</span>°</div>
         <div>基線長: <span id="distance">--</span> m</div>
         <div>基線誤差: <span id="error">--</span> m</div>
@@ -26,6 +27,16 @@
             <input type="checkbox" id="followMapCheckbox" checked aria-label="地図追従を有効にする">
             地図追従
         </label>
+        <label>
+            <input type="checkbox" id="gridCheckbox" checked aria-label="グリッド線を表示する">
+            グリッド線表示
+        </label>
+        <label for="coordSystemSelect">座標系:</label>
+        <select id="coordSystemSelect" aria-label="座標系の選択">
+            <option value="wgs84">緯度経度</option>
+            <option value="utm">UTM</option>
+            <option value="jgd2011">平面直角座標</option>
+        </select>
     </div>
 
     <div class="slider-box overlay-box">
@@ -35,13 +46,70 @@
 
     <div id="map"></div>
 
+    <script src="/static/proj4.js"></script>
     <script src="/static/leaflet/leaflet.js"></script>
     <script>
+        // proj4 定義
+        proj4.defs('EPSG:6677', '+proj=tmerc +lat_0=36 +lon_0=139.8333333333333 +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs');
+
+        // カスタムグリッドレイヤー
+        L.GridLayer.CustomGrid = L.GridLayer.extend({
+            createTile: function(coords) {
+                const tile = L.DomUtil.create('canvas', 'leaflet-tile');
+                const ctx = tile.getContext('2d');
+                const size = this.getTileSize();
+                tile.width = size.x;
+                tile.height = size.y;
+
+                // ズームレベルに応じたグリッド間隔
+                const zoom = coords.z;
+                const gridSpacing = zoom >= 18 ? 0.0001 : zoom >= 16 ? 0.001 : 0.01;
+
+                // タイルの地理座標範囲
+                const nw = this._map.unproject([coords.x * size.x, coords.y * size.y], zoom);
+                const se = this._map.unproject([(coords.x + 1) * size.x, (coords.y + 1) * size.y], zoom);
+
+                ctx.strokeStyle = 'rgba(0, 0, 255, 0.5)';
+                ctx.lineWidth = 1;
+
+                // 縦線（経度）
+                let lon = Math.floor(nw.lng / gridSpacing) * gridSpacing;
+                while (lon <= se.lng) {
+                    const start = this._map.project([nw.lat, lon], zoom).subtract([coords.x * size.x, coords.y * size.y]);
+                    const end = this._map.project([se.lat, lon], zoom).subtract([coords.x * size.x, coords.y * size.y]);
+                    ctx.beginPath();
+                    ctx.moveTo(start.x, start.y);
+                    ctx.lineTo(end.x, end.y);
+                    ctx.stroke();
+                    lon += gridSpacing;
+                }
+
+                // 横線（緯度）
+                let lat = Math.floor(se.lat / gridSpacing) * gridSpacing;
+                while (lat <= nw.lat) {
+                    const start = this._map.project([lat, nw.lng], zoom).subtract([coords.x * size.x, coords.y * size.y]);
+                    const end = this._map.project([lat, se.lng], zoom).subtract([coords.x * size.x, coords.y * size.y]);
+                    ctx.beginPath();
+                    ctx.moveTo(start.x, start.y);
+                    ctx.lineTo(end.x, end.y);
+                    ctx.stroke();
+                    lat += gridSpacing;
+                }
+
+                return tile;
+            }
+        });
+
+        L.gridLayer.customGrid = function() {
+            return new L.GridLayer.CustomGrid();
+        };
+
         const state = {
             map: L.map('map', { zoomControl: false, center: [35.681236, 139.767125], zoom: 18 }),
             baseMarker: L.circleMarker([0, 0], { radius: 6, color: 'blue' }),
             headingLine: L.polyline([[0, 0], [0, 0]], { color: 'red', weight: 2 }),
             fanShape: L.polygon([[0, 0]], { color: 'green', fillColor: 'green', fillOpacity: 0.3, weight: 1 }),
+            gridLayer: L.gridLayer.customGrid(),
             fanAngle: 45,
             lastKnownHeading: 0.0,
             lastLat: 0.0,
@@ -50,12 +118,14 @@
             lastUpdateTime: Date.now(),
             initialViewSet: false,
             isFollowingMap: true,
-            errorCount: 0
+            errorCount: 0,
+            coordSystem: 'wgs84'
         };
 
         state.baseMarker.addTo(state.map);
         state.headingLine.addTo(state.map);
         state.fanShape.addTo(state.map);
+        state.gridLayer.addTo(state.map);
         L.control.zoom({ position: 'bottomright' }).addTo(state.map);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -67,14 +137,13 @@
         const MAX_ERROR_COUNT = 3;
         const HDOP_THRESHOLD = 2.0;
 
-        // スライダーイベント
+        // イベントリスナー
         document.getElementById("fanSlider").addEventListener("input", () => {
             state.fanAngle = parseInt(document.getElementById("fanSlider").value);
             document.getElementById("fanValue").textContent = state.fanAngle;
             updateGeometrySizes();
         });
 
-        // 地図追従イベント
         document.getElementById("followMapCheckbox").addEventListener('change', function() {
             state.isFollowingMap = this.checked;
             if (state.isFollowingMap && state.baseMarker.getLatLng().lat !== 0.0) {
@@ -82,13 +151,31 @@
             }
         });
 
-        // 地図操作イベント
+        document.getElementById("gridCheckbox").addEventListener('change', function() {
+            if (this.checked) {
+                state.gridLayer.addTo(state.map);
+            } else {
+                state.map.removeLayer(state.gridLayer);
+            }
+        });
+
+        document.getElementById("coordSystemSelect").addEventListener('change', function() {
+            state.coordSystem = this.value;
+            document.getElementById("coord_system").textContent = {
+                wgs84: '緯度経度',
+                utm: 'UTM',
+                jgd2011: '平面直角座標'
+            }[state.coordSystem];
+            updateCoordinatesDisplay(state.lastLat, state.lastLon);
+        });
+
         state.map.on('movestart', () => {
             if (state.isFollowingMap) {
                 document.getElementById("followMapCheckbox").checked = false;
                 state.isFollowingMap = false;
             }
         });
+
         state.map.on('zoomstart', () => {
             if (state.isFollowingMap) {
                 document.getElementById("followMapCheckbox").checked = false;
@@ -96,8 +183,29 @@
             }
         });
 
-        // ウィンドウリサイズイベント
         window.addEventListener('resize', updateGeometrySizes);
+
+        function updateCoordinatesDisplay(lat, lon) {
+            const xCoordElement = document.getElementById("x_coord");
+            const yCoordElement = document.getElementById("y_coord");
+            if (lat === 0.0 && lon === 0.0) {
+                xCoordElement.textContent = "--";
+                yCoordElement.textContent = "--";
+                return;
+            }
+            if (state.coordSystem === 'wgs84') {
+                xCoordElement.textContent = lat.toFixed(6);
+                yCoordElement.textContent = lon.toFixed(6);
+            } else if (state.coordSystem === 'utm') {
+                const utm = proj4('EPSG:4326', 'EPSG:32654', [lon, lat]); // UTM Zone 54N (東京)
+                xCoordElement.textContent = utm[0].toFixed(2) + ' m';
+                yCoordElement.textContent = utm[1].toFixed(2) + ' m';
+            } else if (state.coordSystem === 'jgd2011') {
+                const jgd = proj4('EPSG:4326', 'EPSG:6677', [lon, lat]); // JGD2011 Zone IX
+                xCoordElement.textContent = jgd[0].toFixed(2) + ' m';
+                yCoordElement.textContent = jgd[1].toFixed(2) + ' m';
+            }
+        }
 
         function calculateDistanceForPixels(targetPixels) {
             const centerPoint = state.map.latLngToLayerPoint(state.map.getCenter());
@@ -179,7 +287,7 @@
                 .then(data => {
                     const lat = data.lat;
                     const lon = data.lon;
-                    const fusedHeading = data.heading; // サーバー側で融合済み
+                    const fusedHeading = data.heading;
                     const imuRawGyroZ = data.imu_raw_gyro_z;
                     const imuStatus = data.imu;
                     const error = data.error;
@@ -188,8 +296,7 @@
                     const hdop_rover = data.hdop_rover;
 
                     // UI更新
-                    document.getElementById("lat").textContent = lat.toFixed(6);
-                    document.getElementById("lon").textContent = lon.toFixed(6);
+                    updateCoordinatesDisplay(lat, lon);
                     document.getElementById("heading").textContent = fusedHeading.toFixed(1);
                     document.getElementById("distance").textContent = distance.toFixed(2);
                     document.getElementById("error").textContent = error.toFixed(2);
@@ -216,8 +323,8 @@
                     state.errorCount++;
                     if (state.errorCount >= MAX_ERROR_COUNT) {
                         statusMessageElement.textContent = `エラー: ${error.message}`;
-                        document.getElementById("lat").textContent = "--";
-                        document.getElementById("lon").textContent = "--";
+                        document.getElementById("x_coord").textContent = "--";
+                        document.getElementById("y_coord").textContent = "--";
                         document.getElementById("heading").textContent = "--";
                         document.getElementById("distance").textContent = "--";
                         document.getElementById("error").textContent = "--";
@@ -237,3 +344,4 @@
     </script>
 </body>
 </html>
+
