@@ -40,10 +40,16 @@ html, body {
     display: flex;
     align-items: center;
     cursor: pointer;
+    margin-bottom: 5px;
 }
 
 .control-box input[type="checkbox"] {
     margin-right: 5px;
+}
+
+.control-box select {
+    margin-top: 5px;
+    padding: 2px;
 }
 
 .slider-box {
@@ -56,3 +62,5 @@ html, body {
     font-weight: bold;
     margin-top: 5px;
 }
+
+
