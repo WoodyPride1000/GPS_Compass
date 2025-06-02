@@ -44,6 +44,19 @@ Flaskサーバーはデフォルトでポート5000番で起動します。
   地図が表示され、基準局（緑マーカー）、移動局（赤マーカー）、方位角、推定誤差がリアルタイムに更新されます。
 
 
+   ```bash
+project/
+├── app.py
+├── config.ini
+├── templates/
+│   └── index.html
+├── static/
+│   ├── styles.css
+│   ├── leaflet/
+│   │   ├── leaflet.css
+│   │   └── leaflet.js
+└── app.log
+```
 
 
 
